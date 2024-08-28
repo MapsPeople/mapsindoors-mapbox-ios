@@ -32,8 +32,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/MapsPeople/mapsindoors-core-ios.git",
       "state" : {
-        "revision" : "dd5acc0b20bbecd935bb26a067bab1e41fd5c956",
-        "version" : "4.5.12"
+        "revision" : "33e3fcd7326b9937a96f95bbb3a542fd7a5f5432",
+        "version" : "4.5.14"
       }
     },
     {
