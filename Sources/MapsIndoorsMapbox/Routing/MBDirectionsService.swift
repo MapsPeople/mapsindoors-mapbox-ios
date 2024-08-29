@@ -4,7 +4,6 @@
 
 import Foundation
 import MapsIndoorsCore
-import MapsIndoors
 
 class MBDirectionsService: MPExternalDirectionsService {
     

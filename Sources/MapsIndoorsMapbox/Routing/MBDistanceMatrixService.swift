@@ -1,5 +1,4 @@
 import Foundation
-import MapsIndoors
 import MapsIndoorsCore
 
 class MBDistanceMatrixService: MPExternalDistanceMatrixService {
