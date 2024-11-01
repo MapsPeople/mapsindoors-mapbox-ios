@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-let mapsindoorsVersion = Version("4.6.3-beta.2")
+let mapsindoorsVersion = Version("4.6.3-beta.3")
 
 let package = Package(
     name: "MapsIndoorsMapbox",
@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(
             name: "MapsIndoorsMapbox",
+            type: .dynamic,
             targets: ["MapsIndoorsMapbox"]
         ),
     ],
