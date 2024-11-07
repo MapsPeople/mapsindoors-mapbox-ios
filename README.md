@@ -1,6 +1,5 @@
-[![Swift 5.9](https://img.shields.io/badge/Swift-5.9-red.svg?style=flat)](https://developer.apple.com/swift)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS-blue.svg)]()
-
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FMapsPeople%2Fmapsindoors-mapbox-ios%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/MapsPeople/mapsindoors-mapbox-ios)
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FMapsPeople%2Fmapsindoors-mapbox-ios%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/MapsPeople/mapsindoors-mapbox-ios)
 
 # MapsIndoors with Mapbox Maps SDK for iOS Swift Package
 
