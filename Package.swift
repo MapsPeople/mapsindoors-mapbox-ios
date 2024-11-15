@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-let mapsindoorsVersion = Version("4.6.2")
+let mapsindoorsVersion = Version("4.6.3")
 
 let package = Package(
     name: "MapsIndoorsMapbox",
@@ -16,7 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/MapsPeople/mapsindoors-core-ios.git", exact: mapsindoorsVersion),
-        .package(url: "https://github.com/mapbox/mapbox-maps-ios.git", exact: "11.6.0"),
+        .package(url: "https://github.com/mapbox/mapbox-maps-ios.git", exact: "11.7.0"),
     ],
     targets: [
         .target(
