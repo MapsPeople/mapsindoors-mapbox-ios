@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 @_spi(Experimental) import MapboxMaps
 @_spi(Private) import MapsIndoorsCore
@@ -13,18 +14,20 @@ class MBRenderer {
 
     private weak var map: MapboxMap?
     private var _geoJsonSource: GeoJSONSource?
+    private var _geometryGeoJsonSource: GeoJSONSource?
     private var _geoJsonSourceNoCollision: GeoJSONSource?
     private var _model3dGeoJsonSource: GeoJSONSource?
     private var _extrusionGeoJsonSource: GeoJSONSource?
+    private var _wallsGeoJsonSource: GeoJSONSource?
     private weak var mapView: MapView?
+
+    private var _lastModels = Set<AnyHashable>()
+    private var lock = UnfairLock()
 
     // Dictionary to store created info windows
     private var infoWindows = MPThreadSafeDictionary<String, UIView>()
 
     private weak var provider: MapBoxProvider?
-
-    private var _lastModels = Set<AnyHashable>()
-    private var lock = UnfairLock()
 
     private var onImageUnusedCancelable: Cancelable?
 
@@ -39,36 +42,42 @@ class MBRenderer {
             }
         }
 
-        DispatchQueue.main.async { [self] in
-            do {
-                try setupGeoJsonSource()
-                try setupLayersInOrder()
-                try configureFlatLabelsLayer()
-                try configureGraphicLabelsLayer()
-                try configureMarkerLayer(layerId: Constants.LayerIDs.markerLayer)
-                try configureMarkerLayer(layerId: Constants.LayerIDs.markerNoCollisionLayer)
-                try configurePolygonLayers()
-                try configureFloorPlanLayer()
-                try configure2DModelLayer()
-                try configure3DModelLayer()
-                try configureWallExtrusionLayer()
-                try configureFeatureExtrusionLayer()
-            } catch {
-                MPLog.mapbox.error("Error setting up some layer/source: \(error.localizedDescription)")
-            }
+        do {
+            try setupGeoJsonSource()
+            try setupLayersInOrder()
+            try configureFlatLabelsLayer()
+            try configureGraphicLabelsLayer()
+            try configureMarkerLayer(layerId: Constants.LayerIDs.markerLayer)
+            try configureMarkerLayer(layerId: Constants.LayerIDs.markerNoCollisionLayer)
+            try configurePolygonLayers()
+            try configureFloorPlanLayer()
+            try configure2DModelLayer()
+            try configure3DModelLayer()
+            try configureWallExtrusionLayer()
+            try configureFeatureExtrusionLayer()
+        } catch {
+            MPLog.mapbox.error("Error setting up some layer/source: \(error.localizedDescription)")
         }
+
+        configureForCollisionHandling(overlap: collisionHandling)
+
+        cancellable = NotificationCenter.default
+            .publisher(for: Notification.Name(rawValue: "click"))
+            .sink { _ in
+                self.enabled = !(self.enabled)
+            }
     }
 
     private func setupLayersInOrder() throws {
         // Tile layer is added in `MBTileProvider`
 
         // Polygon
-        let polygonFillLayer = FillLayer(id: Constants.LayerIDs.polygonFillLayer, source: Constants.SourceIDs.geoJsonSource)
-        let polygonLineLayer = LineLayer(id: Constants.LayerIDs.polygonLineLayer, source: Constants.SourceIDs.geoJsonSource)
+        let polygonFillLayer = FillLayer(id: Constants.LayerIDs.polygonFillLayer, source: Constants.SourceIDs.geoJsonGeometrySource)
+        let polygonLineLayer = LineLayer(id: Constants.LayerIDs.polygonLineLayer, source: Constants.SourceIDs.geoJsonGeometrySource)
 
         // Floor Plan
-        let floorPlanFillLayer = FillLayer(id: Constants.LayerIDs.floorPlanFillLayer, source: Constants.SourceIDs.geoJsonSource)
-        let floorPlanLineLayer = LineLayer(id: Constants.LayerIDs.floorPlanLineLayer, source: Constants.SourceIDs.geoJsonSource)
+        let floorPlanFillLayer = FillLayer(id: Constants.LayerIDs.floorPlanFillLayer, source: Constants.SourceIDs.geoJsonGeometrySource)
+        let floorPlanLineLayer = LineLayer(id: Constants.LayerIDs.floorPlanLineLayer, source: Constants.SourceIDs.geoJsonGeometrySource)
 
         // Flat Labels
         let flatLabelsLayer = SymbolLayer(id: Constants.LayerIDs.flatLabelsLayer, source: Constants.SourceIDs.geoJsonSource)
@@ -91,7 +100,7 @@ class MBRenderer {
         let circleLayer = CircleLayer(id: Constants.LayerIDs.circleLayer, source: Constants.SourceIDs.blueDotSource)
 
         // Wall extrusion layer
-        let wallExtrusionLayer = FillExtrusionLayer(id: Constants.LayerIDs.wallExtrusionLayer, source: Constants.SourceIDs.geoJsonSourceExtrusions)
+        let wallExtrusionLayer = FillExtrusionLayer(id: Constants.LayerIDs.wallExtrusionLayer, source: Constants.SourceIDs.geoJsonSourceWalls)
 
         // Feature extrusion layer
         let featureExtrusionLayer = FillExtrusionLayer(id: Constants.LayerIDs.featureExtrusionLayer, source: Constants.SourceIDs.geoJsonSourceExtrusions)
@@ -137,28 +146,44 @@ class MBRenderer {
     private func setupGeoJsonSource() throws {
         _geoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSource)
         _geoJsonSource?.data = nil
-        _geoJsonSource?.tolerance = 0.1
+        _geoJsonSource?.tolerance = 0.2
         try map?.addSource(_geoJsonSource!)
 
         _geoJsonSourceNoCollision = GeoJSONSource(id: Constants.SourceIDs.geoJsonNoCollisionSource)
         _geoJsonSourceNoCollision?.data = nil
-        _geoJsonSourceNoCollision?.tolerance = 0.1
+        _geoJsonSourceNoCollision?.tolerance = 0.2
         try map?.addSource(_geoJsonSourceNoCollision!)
+
+        _geometryGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonGeometrySource)
+        _geometryGeoJsonSource?.data = nil
+        _geometryGeoJsonSource?.tolerance = 0.2
+        try map?.addSource(_geometryGeoJsonSource!)
 
         _model3dGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSource3dModels)
         _model3dGeoJsonSource?.data = nil
+        _model3dGeoJsonSource?.tolerance = 0.5
         try map?.addSource(_model3dGeoJsonSource!)
 
         _extrusionGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSourceExtrusions)
         _extrusionGeoJsonSource?.data = nil
-        _extrusionGeoJsonSource?.tolerance = 0.1
+        _extrusionGeoJsonSource?.tolerance = 0.2
         try map?.addSource(_extrusionGeoJsonSource!)
+
+        _wallsGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSourceWalls)
+        _wallsGeoJsonSource?.data = nil
+        _wallsGeoJsonSource?.tolerance = 0.2
+        try map?.addSource(_wallsGeoJsonSource!)
     }
 
     // MARK: Layers: adding and setting properties
 
     private func configureMarkerLayer(layerId: String) throws {
         try map?.updateLayer(withId: layerId, type: SymbolLayer.self) { layerUpdate in
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.marker.rawValue }
+            }
+
             layerUpdate.iconImage = .expression(Exp(.switchCase) {
                 Exp(.eq) {
                     Exp(.get) { Key.hasImage.rawValue }
@@ -196,16 +221,15 @@ class MBRenderer {
             layerUpdate.textHaloColor = .expression(Exp(.get) { Key.labelHaloColor.rawValue })
             layerUpdate.textHaloWidth = .expression(Exp(.get) { Key.labelHaloWidth.rawValue })
             layerUpdate.textHaloBlur = .expression(Exp(.get) { Key.labelHaloBlur.rawValue })
-
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.marker.rawValue }
-            }
         }
     }
 
     private func configureFlatLabelsLayer() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.flatLabelsLayer, type: SymbolLayer.self) { layerUpdate in
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.labelType.rawValue }
+                Exp(.literal) { MPLabelType.flat.rawValue }
+            }
 
             layerUpdate.textField = .expression(Exp(.get) { Key.markerLabel.rawValue })
             layerUpdate.textAnchor = .constant(TextAnchor.center)
@@ -264,16 +288,16 @@ class MBRenderer {
                     stops
                 }
             )
-
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.labelType.rawValue }
-                Exp(.literal) { MPLabelType.flat.rawValue }
-            }
         }
     }
 
     private func configureGraphicLabelsLayer() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.graphicLabelsLayer, type: SymbolLayer.self) { layerUpdate in
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.labelType.rawValue }
+                Exp(.literal) { MPLabelType.graphic.rawValue }
+            }
+
             layerUpdate.iconImage = .expression(Exp(.switchCase) {
                 Exp(.eq) {
                     Exp(.get) { Key.hasImage.rawValue }
@@ -308,11 +332,6 @@ class MBRenderer {
             layerUpdate.textOptional = .constant(false)
             layerUpdate.iconIgnorePlacement = .constant(false)
             layerUpdate.textIgnorePlacement = .constant(false)
-
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.labelType.rawValue }
-                Exp(.literal) { MPLabelType.graphic.rawValue }
-            }
         }
     }
 
@@ -420,10 +439,6 @@ class MBRenderer {
             layerUpdate.modelRotation = .expression(Exp(.get) { Key.model3DRotation.rawValue })
             layerUpdate.modelType = .constant(.common3d)
             layerUpdate.slot = .middle
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.model3d.rawValue }
-            }
         }
     }
 
@@ -432,12 +447,6 @@ class MBRenderer {
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.wallExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.wallExtrusionHeight.rawValue })
             layerUpdate.slot = .middle
-            layerUpdate.filter = Exp(.any) {
-                Exp(.eq) {
-                    Exp(.get) { Key.type.rawValue }
-                    Exp(.literal) { MPRenderedFeatureType.wallExtrusion.rawValue }
-                }
-            }
         }
     }
 
@@ -446,10 +455,6 @@ class MBRenderer {
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.featureExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.featureExtrusionHeight.rawValue })
             layerUpdate.slot = .middle
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.featureExtrusion.rawValue }
-            }
         }
     }
 
@@ -463,32 +468,38 @@ class MBRenderer {
 
     var featureExtrusionOpacity: Double = 0 {
         didSet {
-            DispatchQueue.main.async {
-                do {
-                    try self.map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
-                        layer.fillExtrusionOpacity = .constant(self.featureExtrusionOpacity)
-                    }
-                } catch {}
+            if oldValue != featureExtrusionOpacity {
+                DispatchQueue.main.async {
+                    do {
+                        try self.map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
+                            layer.fillExtrusionOpacity = .constant(self.featureExtrusionOpacity)
+                        }
+                    } catch {}
+                }
             }
         }
     }
 
     var wallExtrusionOpacity: Double = 0 {
         didSet {
-            DispatchQueue.main.async {
-                do {
-                    try self.map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
-                        layer.fillExtrusionOpacity = .constant(self.wallExtrusionOpacity)
-                    }
-                } catch {}
+            if oldValue != wallExtrusionOpacity {
+                DispatchQueue.main.async {
+                    do {
+                        try self.map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
+                            layer.fillExtrusionOpacity = .constant(self.wallExtrusionOpacity)
+                        }
+                    } catch {}
+                }
             }
         }
     }
 
     var collisionHandling: MPCollisionHandling = .allowOverLap {
         didSet {
-            DispatchQueue.main.async {
-                self.configureForCollisionHandling(overlap: self.collisionHandling)
+            if oldValue != collisionHandling {
+                DispatchQueue.main.async {
+                    self.configureForCollisionHandling(overlap: self.collisionHandling)
+                }
             }
         }
     }
@@ -537,47 +548,6 @@ class MBRenderer {
         }
     }
 
-    // MARK: Label position
-
-    /*
-      TODO: Wrong implementation apporach - commenting out for now
-     var labelPosition: MPLabelPosition = .right {
-         didSet {
-             self.configureForLabelPosition(position: self.labelPosition)
-         }
-     }
-
-     private func configureForLabelPosition(position: MPLabelPosition) {
-         let anchor: TextAnchor
-
-         switch position {
-         case .bottom:
-             anchor = .top
-         case .left:
-             anchor = .left
-         case .top:
-             anchor = .bottom
-         case .right:
-             anchor = .right
-         }
-
-         do {
-             if map.layerExists(withId: Constants.LayerIDs.markerLayer) {
-                 try map.style.updateLayer(withId: Constants.LayerIDs.markerLayer, type: SymbolLayer.self) { layer in
-                     layer.textAnchor = .constant(anchor)
-                 }
-             }
-             if map.style.layerExists(withId: Constants.LayerIDs.markerNoCollisionLayer) {
-                 try map.style.updateLayer(withId: Constants.LayerIDs.markerNoCollisionLayer, type: SymbolLayer.self) { layer in
-                     layer.textAnchor = .constant(anchor)
-                 }
-             }
-         } catch {
-             MPLog.mapbox.error("Error updating layer: \(error.localizedDescription)")
-         }
-     }
-      */
-
     // MARK: Rendering and updating source
 
     var customInfoWindow: MPCustomInfoWindow?
@@ -593,87 +563,6 @@ class MBRenderer {
         provider?.onInfoWindowTapped(locationId: sender.modelId)
     }
 
-    func render(models: [any MPViewModel]) {
-        Task.detached(priority: .userInitiated) { [self] in
-            let models = await withTaskGroup(of: ([Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature])] in
-                lock.locked { removeOldModels(models: models) }
-                for model in models {
-                    _ = group.addTaskUnlessCancelled(priority: .high) { [self] in
-                        lock.locked { _ = _lastModels.insert(model) }
-                        updateInfoWindow(for: model)
-                        updateImage(for: model)
-                        update2DModel(for: model)
-                        update3DModel(for: model)
-
-                        var features = [Feature]()
-                        var featuresNonCollision = [Feature]()
-                        var featuresExtrusions = [Feature]()
-                        var features3DModels = [Feature]()
-
-                        if let marker = model.markerFeature {
-                            if model.marker?.properties[.isCollidable] as? Bool ?? true == false {
-                                featuresNonCollision.append(marker)
-                                features.append(marker)
-                            } else {
-                                features.append(marker)
-                            }
-                        }
-
-                        if let polygon = model.polygonFeature {
-                            features.append(polygon)
-                        }
-
-                        if isFloorPlanEnabled, let floorPlan = model.floorPlanFeature {
-                            features.append(floorPlan)
-                        }
-
-                        if is2dModelsEnabled, let model2D = model.model2DFeature,
-                           let model2DGeometry = model.model2DGeometryFeature {
-                            features.append(model2D)
-                            features.append(model2DGeometry)
-                        }
-
-                        if let model3D = model.model3DFeature {
-                            features3DModels.append(model3D)
-                        }
-
-                        if isWallExtrusionsEnabled, let wallExtrusionLayer = model.wallExtrusionFeature {
-                            featuresExtrusions.append(wallExtrusionLayer)
-                        }
-
-                        if isFeatureExtrusionsEnabled, let featureExtrusionLayer = model.featureExtrusionFeature {
-                            featuresExtrusions.append(featureExtrusionLayer)
-                        }
-
-                        return (features, featuresNonCollision, featuresExtrusions, features3DModels)
-                    }
-                }
-
-                let res = await group.reduce(into: [([Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
-
-                return res
-            }
-
-            var features = [Feature]()
-            var featuresNonCollision = [Feature]()
-            var featuresExtrusions = [Feature]()
-            var features3DModels = [Feature]()
-            features.reserveCapacity(models.count)
-            featuresNonCollision.reserveCapacity(models.count)
-            featuresExtrusions.reserveCapacity(models.count)
-            features3DModels.reserveCapacity(models.count)
-
-            for x in models {
-                features.append(contentsOf: x.0)
-                featuresNonCollision.append(contentsOf: x.1)
-                featuresExtrusions.append(contentsOf: x.2)
-                features3DModels.append(contentsOf: x.3)
-            }
-
-            updateGeoJSONSource(features: features, nonCollisionFeatures: featuresNonCollision, featuresExtrusions: featuresExtrusions, features3DModels: features3DModels)
-        }
-    }
-
     private func removeOldModels(models: [any MPViewModel]) {
         let modelsNoLongerInView = _lastModels.subtracting(models as! [AnyHashable])
         for model in modelsNoLongerInView {
@@ -682,6 +571,123 @@ class MBRenderer {
             }
         }
         _lastModels.removeAll(keepingCapacity: false)
+    }
+
+    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
+
+    // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
+    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 5_000)
+    func render(models: [any MPViewModel]) async throws {
+        try Task.checkCancellation()
+        let startTime = DispatchTime.now()
+        d.async { self.removeOldModels(models: models) }
+        try Task.checkCancellation()
+        let models = await withTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+            for model in models {
+                _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [self] in
+
+                    d.async { _ = self._lastModels.insert(model) }
+                    updateInfoWindow(for: model)
+
+                    let md5 = model.md5
+                    if let cacheHit = modelCache[md5] {
+                        return cacheHit
+                    }
+
+                    updateImage(for: model)
+                    update2DModel(for: model)
+
+                    var features = [Feature]()
+                    var featuresGeometry = [Feature]()
+                    var featuresNonCollision = [Feature]()
+                    var featuresExtrusions = [Feature]()
+                    var featuresWalls = [Feature]()
+                    var features3DModels = [Feature]()
+
+                    if let marker = model.markerFeature {
+                        if model.marker?.properties[.isCollidable] as? Bool ?? true == false {
+                            featuresNonCollision.append(marker)
+                            features.append(marker)
+                        } else {
+                            features.append(marker)
+                        }
+                    }
+
+                    if let polygon = model.polygonFeature {
+                        featuresGeometry.append(polygon)
+                    }
+
+                    if isFloorPlanEnabled, let floorPlan = model.floorPlanFeature {
+                        featuresGeometry.append(floorPlan)
+                    }
+
+                    if is2dModelsEnabled, let model2D = model.model2DFeature,
+                       let model2DGeometry = model.model2DGeometryFeature {
+                        features.append(model2D)
+                        features.append(model2DGeometry)
+                    }
+
+                    if let model3D = model.model3DFeature {
+                        features3DModels.append(model3D)
+                    }
+
+                    if isWallExtrusionsEnabled, let wallExtrusionLayer = model.wallExtrusionFeature {
+                        featuresWalls.append(wallExtrusionLayer)
+                    }
+
+                    if isFeatureExtrusionsEnabled, let featureExtrusionLayer = model.featureExtrusionFeature {
+                        featuresExtrusions.append(featureExtrusionLayer)
+                    }
+
+                    let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
+
+                    modelCache[md5] = result
+
+                    return result
+                }
+            }
+
+            let res = await group.reduce(into: [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
+
+            return res
+        }
+
+        try Task.checkCancellation()
+
+        var features = [Feature]()
+        var featuresGeometry = [Feature]()
+        var featuresNonCollision = [Feature]()
+        var featuresExtrusions = [Feature]()
+        var featuresWalls = [Feature]()
+        var features3DModels = [Feature]()
+        features.reserveCapacity(models.count)
+        featuresGeometry.reserveCapacity(models.count)
+        featuresNonCollision.reserveCapacity(models.count)
+        featuresExtrusions.reserveCapacity(models.count)
+        featuresWalls.reserveCapacity(models.count)
+        features3DModels.reserveCapacity(models.count)
+
+        try Task.checkCancellation()
+
+        for x in models {
+            features.append(contentsOf: x.0)
+            featuresGeometry.append(contentsOf: x.1)
+            featuresNonCollision.append(contentsOf: x.2)
+            featuresExtrusions.append(contentsOf: x.3)
+            featuresWalls.append(contentsOf: x.4)
+            features3DModels.append(contentsOf: x.5)
+        }
+
+        try Task.checkCancellation()
+
+        let elapsedTimeInNanoSec = DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds
+        let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000_000
+        let loadingMeasurementInSec = round(elapsedTimeInMilliSec * 100) / 100
+        MPLog.mapbox.debug("ViewModel to Feature took \(loadingMeasurementInSec) seconds")
+
+        try Task.checkCancellation()
+
+        try updateGeoJSONSource(features: features, geometryFeatures: featuresGeometry, nonCollisionFeatures: featuresNonCollision, featuresExtrusions: featuresExtrusions, featuresWalls: featuresWalls, features3DModels: features3DModels)
     }
 
     private func removeInfoWindow(for model: any MPViewModel) {
@@ -699,7 +705,7 @@ class MBRenderer {
             }
         } else {
             removeInfoWindow(for: model)
-            infoWindows.remove(key: model.id)
+            infoWindows.removeValue(forKey: model.id)
         }
     }
 
@@ -740,11 +746,11 @@ class MBRenderer {
                 offsetY: yOffset
             )
 
-            let infoWindowView = infoWindows.getValue(key: model.id)
+            let infoWindowView = infoWindows[model.id]
 
             if infoWindowView == nil {
                 if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
-                    infoWindows.setValue(value: infoWindowView, key: model.id)
+                    infoWindows[model.id] = infoWindowView
                 }
             }
 
@@ -784,31 +790,41 @@ class MBRenderer {
         }
     }
 
-    // TODO: remove addedModels - just a heuristic to avoid flickering by repeatedly adding the same model, while we're missing some interface from Mapbox
-    private var addedModels = [String: String]()
-    private func update3DModel(for model: any MPViewModel) {
-        if let model3DUri = model.model3D?.properties[.model3dUri] as? String, let model3DId = model.model3D?.id /* , is3dModelsEnabled */ {
-            DispatchQueue.main.sync {
-                if self.addedModels[model3DId] == nil || self.addedModels[model3DId] != model3DUri {
-                    do {
-                        try self.map?.addStyleModel(modelId: model3DId, modelUri: model3DUri)
-                        self.addedModels[model3DId] = model3DUri
-                    } catch {}
-                }
-            }
+    var enabled = true {
+        didSet {
+            print("enabled: \(String(enabled))")
         }
     }
 
-    private func updateGeoJSONSource(features: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], features3DModels: [Feature]) {
+    var cancellable: AnyCancellable?
+
+    private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) throws {
+        try Task.checkCancellation()
         DispatchQueue.main.async { [self] in
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
         }
+
+        try Task.checkCancellation()
+        DispatchQueue.main.async { [self] in
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
+        }
+
+        try Task.checkCancellation()
         DispatchQueue.main.async { [self] in
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
         }
+
+        try Task.checkCancellation()
         DispatchQueue.main.async { [self] in
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
         }
+
+        try Task.checkCancellation()
+        DispatchQueue.main.async { [self] in
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
+        }
+
+        try Task.checkCancellation()
         DispatchQueue.main.async { [self] in
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
         }
@@ -821,6 +837,18 @@ class MBRenderer {
  We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
  */
 private extension MPViewModel {
+    var md5: String {
+        let id = id
+        let markerHash = marker?.asString ?? ""
+        let polygonHash = polygon?.asString ?? ""
+        let floorPlanHash = floorPlanExtrusion?.asString ?? ""
+        let model2DHash = model2D?.asString ?? ""
+        let model3DHash = model3D?.asString ?? ""
+        let wallHash = wallExtrusion?.asString ?? ""
+        let featureHash = featureExtrusion?.asString ?? ""
+        return (id + markerHash + polygonHash + floorPlanHash + model2DHash + model3DHash + wallHash + featureHash).md5
+    }
+
     var markerFeature: Feature? {
         guard let marker else { return nil }
         let string = marker.toGeoJson()
@@ -957,7 +985,7 @@ private extension MapboxMap {
                 MPLog.mapbox.error("Error adding/updating image: \(error.localizedDescription)")
             }
         } else {
-            DispatchQueue.main.sync {
+            DispatchQueue.main.async {
                 do {
                     if let stretchX, let stretchY, let content {
                         try self.addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
@@ -1008,4 +1036,27 @@ private class UnfairLock {
 
     /// Will place labels on right.
     case right
+}
+
+private extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])> {
+    subscript(key: String) -> ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])? {
+        get {
+            value(forKey: key)
+        }
+        set {
+            if let array = newValue {
+                let stride = MemoryLayout<Feature>.stride
+                let usedBytes = array.0.count * stride +
+                    array.1.count * stride +
+                    array.2.count * stride +
+                    array.3.count * stride +
+                    array.4.count * stride +
+                    array.5.count * stride
+
+                setValue(array, forKey: key, cost: usedBytes)
+            } else {
+                removeValue(forKey: key)
+            }
+        }
+    }
 }

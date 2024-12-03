@@ -27,8 +27,10 @@ enum Constants {
     enum SourceIDs {
         static let tileSource = "TILE_SOURCE"
         static let geoJsonSource = "GEOJSON_SOURCE"
+        static let geoJsonGeometrySource = "GEOJSON_GEOMETRY_SOURCE"
         static let geoJsonNoCollisionSource = "GEOJSON_NO_COLLISION_SOURCE"
         static let geoJsonSourceExtrusions = "GEOJSON_EXTRUSIONS_SOURCE"
+        static let geoJsonSourceWalls = "GEOJSON_WALLS_SOURCE"
         static let geoJsonSource3dModels = "GEOJSON_3DMODELS_SOURCE"
         static let circleSource = "CIRCLE_SOURCE"
         static let blueDotSource = "BLUEDOT_SOURCE"

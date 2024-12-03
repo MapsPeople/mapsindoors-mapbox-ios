@@ -1,6 +1,6 @@
 import Foundation
-import MapboxMaps
 import MapsIndoorsCore
+@_spi(Experimental) import MapboxMaps
 
 public class MapBoxProvider: MPMapProvider {
     public let model2DResolutionLimit = 500
@@ -71,23 +71,27 @@ public class MapBoxProvider: MPMapProvider {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
 
+    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
+
     private var lastSetViewModels = [any MPViewModel]()
     public func setViewModels(models: [any MPViewModel], forceClear _: Bool) async {
-        lastSetViewModels.removeAll(keepingCapacity: true)
-        lastSetViewModels.append(contentsOf: models)
+        d.async {
+            self.lastSetViewModels.removeAll(keepingCapacity: true)
+            self.lastSetViewModels.append(contentsOf: models)
+        }
 
         if let r = renderer {
             await configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
-
-        await verifySetup()
 
         // Ignore `forceClear` - not applicable to mapbox rendering
         renderer?.customInfoWindow = customInfoWindow
         renderer?.collisionHandling = collisionHandling
         renderer?.featureExtrusionOpacity = featureExtrusionOpacity
         renderer?.wallExtrusionOpacity = wallExtrusionOpacity
-        renderer?.render(models: models)
+        do {
+            try await renderer?.render(models: models)
+        } catch {}
     }
 
     public var cameraOperator: MPCameraOperator {
@@ -99,6 +103,8 @@ public class MapBoxProvider: MPMapProvider {
     weak var mapView: MapView?
 
     private var accessToken: String
+
+    private var performanceStatisticsCancelable: AnyCancelable?
 
     public required init(mapView: MapView, accessToken: String) {
         self.mapView = mapView
@@ -175,7 +181,12 @@ public class MapBoxProvider: MPMapProvider {
 
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
 
-        await setViewModels(models: lastSetViewModels, forceClear: true)
+        var lastModels = [any MPViewModel]()
+        d.sync {
+            lastModels.append(contentsOf: self.lastSetViewModels)
+        }
+
+        await setViewModels(models: lastModels, forceClear: true)
     }
 
     @objc func onMapClick(_ sender: UITapGestureRecognizer) {

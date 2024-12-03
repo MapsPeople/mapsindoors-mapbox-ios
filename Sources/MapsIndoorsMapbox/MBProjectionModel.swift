@@ -23,22 +23,22 @@ class MBProjectionModel: MPProjection {
             let nearRight = view.mapboxMap.coordinate(for: CGPoint(x: view.frame.width, y: view.frame.height))
             let center = view.mapboxMap.coordinate(for: CGPoint(x: view.frame.width / 2, y: view.frame.height / 2))
 
-            // Add a 50% buffer to the viewport area
+            // Add a 100% buffer to the viewport area
 
             let nearLeftBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: nearLeft, to: center) + 180
-            let nearLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearLeft), to: MPGeoPoint(coordinate: center))
+            let nearLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearLeft), to: MPGeoPoint(coordinate: center)) * 2
             let nearLeftOffset = MPGeometryUtils.computeOffset(from: nearLeft, dist: nearLeftDistanceToCenter, head: nearLeftBearingToCenter)
 
             let nearRightBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: nearRight, to: center) + 180
-            let nearRighDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearRight), to: MPGeoPoint(coordinate: center))
+            let nearRighDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearRight), to: MPGeoPoint(coordinate: center)) * 2
             let nearRighOffset = MPGeometryUtils.computeOffset(from: nearRight, dist: nearRighDistanceToCenter, head: nearRightBearingToCenter)
 
             let farLeftBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: farLeft, to: center) + 180
-            let farLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farLeft), to: MPGeoPoint(coordinate: center))
+            let farLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farLeft), to: MPGeoPoint(coordinate: center)) * 2
             let farLeftOffset = MPGeometryUtils.computeOffset(from: farLeft, dist: farLeftDistanceToCenter, head: farLeftBearingToCenter)
 
             let farRightBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: farRight, to: center) + 180
-            let farRightDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farRight), to: MPGeoPoint(coordinate: center))
+            let farRightDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farRight), to: MPGeoPoint(coordinate: center)) * 2
             let farRightOffset = MPGeometryUtils.computeOffset(from: farRight, dist: farRightDistanceToCenter, head: farRightBearingToCenter)
 
             let bufferedRegion = MPGeoRegion(nearLeft: nearLeftOffset,
