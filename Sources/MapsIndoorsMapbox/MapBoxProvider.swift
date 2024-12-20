@@ -35,7 +35,7 @@ public class MapBoxProvider: MPMapProvider {
 
     private var tileProvider: MBTileProvider?
 
-    private var onStyleLoadedCancelable: Cancelable?
+    private weak var onStyleLoadedCancelable: Cancelable?
 
     @MainActor
     public func setTileProvider(tileProvider: MPTileProvider) async {
@@ -114,7 +114,7 @@ public class MapBoxProvider: MPMapProvider {
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
 
-        onStyleLoadedCancelable = mapView.mapboxMap.onStyleLoaded.observe { _ in
+        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { _ in
             if self.mapView?.mapboxMap.styleURI?.rawValue != self.styleUrl {
                 Task {
                     await self.verifySetup()
