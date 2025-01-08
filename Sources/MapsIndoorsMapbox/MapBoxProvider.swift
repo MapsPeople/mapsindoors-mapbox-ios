@@ -10,6 +10,8 @@ public class MapBoxProvider: MPMapProvider {
             mapboxTransitionHandler?.enableMapboxBuildings = enableNativeMapBuildings
         }
     }
+    
+    public var useMapsIndoorsStyle: Bool = true
 
     private var mapboxTransitionHandler: MapboxWorldTransitionHandler?
 
@@ -39,7 +41,6 @@ public class MapBoxProvider: MPMapProvider {
 
     @MainActor
     public func setTileProvider(tileProvider: MPTileProvider) async {
-        await verifySetup()
         self.tileProvider = MBTileProvider(mapView: mapView, tileProvider: tileProvider, mapProvider: self)
     }
 
@@ -55,7 +56,7 @@ public class MapBoxProvider: MPMapProvider {
 
     public weak var view: UIView?
 
-    public var padding: UIEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) {
+    public var padding: UIEdgeInsets = .zero {
         didSet { adjustOrnaments() }
     }
 
@@ -113,15 +114,15 @@ public class MapBoxProvider: MPMapProvider {
         positionPresenter = MBPositionPresenter(map: self.mapView?.mapboxMap)
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
-
-        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { _ in
-            if self.mapView?.mapboxMap.styleURI?.rawValue != self.styleUrl {
+        
+        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [self] _ in
+            if self.useMapsIndoorsStyle == false {
                 Task {
                     await self.verifySetup()
                 }
             }
         }
-
+        
         Task {
             await self.verifySetup()
         }
@@ -146,9 +147,11 @@ public class MapBoxProvider: MPMapProvider {
             return
         }
 
-        await withCheckedContinuation { continuation in
-            mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
-                continuation.resume()
+        if useMapsIndoorsStyle {
+            await withCheckedContinuation { continuation in
+                mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
+                    continuation.resume()
+                }
             }
         }
 
@@ -236,13 +239,13 @@ public class MapBoxProvider: MPMapProvider {
     private func adjustOrnaments() {
         guard let mapView else { return }
 
+        let bottomPadding = padding.bottom + 5
         mapView.ornaments.options.scaleBar.visibility = .hidden
-        mapView.ornaments.options.logo.margins = .init(x: 20, y: padding.bottom)
+        mapView.ornaments.options.logo.margins = CGPoint(x: 9, y: bottomPadding)
         mapView.ornaments.options.attributionButton.position = .bottomLeading
 
         let pos = mapView.ornaments.logoView.frame.width
-
-        mapView.ornaments.options.attributionButton.margins = .init(x: pos + 20, y: padding.bottom)
+        mapView.ornaments.options.attributionButton.margins = CGPoint(x: pos + 8, y: bottomPadding)
     }
 
     @MainActor

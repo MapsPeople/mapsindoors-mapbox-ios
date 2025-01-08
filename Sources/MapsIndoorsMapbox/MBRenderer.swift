@@ -341,9 +341,15 @@ class MBRenderer {
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.polygonFillOpacity.rawValue })
             layerUpdate.fillSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.polygonArea.rawValue } })
             layerUpdate.slot = .middle
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+            layerUpdate.filter = Exp(.any) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
             }
         }
 
@@ -353,9 +359,15 @@ class MBRenderer {
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.polygonStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
             layerUpdate.slot = .middle
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+            layerUpdate.filter = Exp(.any) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
             }
         }
     }
@@ -624,7 +636,7 @@ class MBRenderer {
                     if is2dModelsEnabled, let model2D = model.model2DFeature,
                        let model2DGeometry = model.model2DGeometryFeature {
                         features.append(model2D)
-                        features.append(model2DGeometry)
+                        featuresGeometry.append(model2DGeometry)
                     }
 
                     if let model3D = model.model3DFeature {
@@ -903,7 +915,7 @@ private extension MPViewModel {
         feature.properties?[Key.polygonFillOpacity.rawValue] = 0.0
         feature.properties?[Key.polygonStrokeOpacity.rawValue] = 0.0
         feature.properties?[Key.polygonArea.rawValue] = JSONValue(width * height)
-        feature.properties?[Key.type.rawValue] = "polygon"
+        feature.properties?[Key.type.rawValue] = "model2d"
 
         return feature
     }
