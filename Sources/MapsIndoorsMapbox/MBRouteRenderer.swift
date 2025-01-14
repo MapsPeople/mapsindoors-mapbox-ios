@@ -1,6 +1,7 @@
 import Foundation
 import MapboxMaps
 import MapsIndoorsCore
+@_spi(Private) import MapsIndoors
 
 extension BinaryFloatingPoint {
     var degrees: Self {
@@ -210,10 +211,10 @@ class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    func moveCamera(points path: [CLLocationCoordinate2D], animate _: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets) {
-        guard path.count >= 2 else { return }
+    func moveCamera(points path: [CLLocationCoordinate2D], animate _: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
+        guard let mapView, path.count >= 2 else { return }
 
-        let bounds = MPGeoBounds(points: path)
+        let bounds = MPGeoBounds(points: path).adjustedTo(maxZoom: maxZoom, mapViewHeight: Double(mapView.frame.width), mapViewWidth: Double(mapView.frame.width))
         var bearing = Double.nan
         var pitch = Double(tilt)
 
@@ -234,9 +235,8 @@ class MBRouteRenderer: MPRouteRenderer {
 
         if !bearing.isNaN {
             do {
-                if let camOptions = try mapView?.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(bearing: bearing, pitch: pitch), coordinatesPadding: padding, maxZoom: nil, offset: nil) {
-                    mapView?.camera.fly(to: camOptions, duration: Double(durationMs) / 5000.0, completion: nil)
-                }
+                let camOptions = try mapView.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(bearing: bearing, pitch: pitch), coordinatesPadding: padding, maxZoom: nil, offset: nil)
+                mapView.camera.fly(to: camOptions, duration: Double(durationMs) / 5000.0, completion: nil)
             } catch {
                 MPLog.mapbox.error("Error trying to move Mapbox camera!")
             }
