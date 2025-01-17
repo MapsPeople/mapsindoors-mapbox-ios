@@ -7,6 +7,7 @@ class MapboxWorldTransitionHandler {
     private let placeLabels = "showPlaceLabels"
     private let roadLabels = "showRoadLabels"
     private let poiLabels = "showPointOfInterestLabels"
+    private let transitLabels = "showTransitLabels"
     private let buildingOpacity = "buildingsOpacity"
 
     weak var map: MapBoxProvider?
@@ -30,9 +31,11 @@ class MapboxWorldTransitionHandler {
             if let showPlacesAndPois = map.showMapboxMapMarkers {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: showPlacesAndPois)
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: showPlacesAndPois)
+                try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: showPlacesAndPois)
             } else {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+                try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
             }
             if let showRoads = map.showMapboxRoadLabels {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: showRoads)
