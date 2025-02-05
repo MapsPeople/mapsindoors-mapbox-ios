@@ -10,7 +10,7 @@ public class MapBoxProvider: MPMapProvider {
             mapboxTransitionHandler?.enableMapboxBuildings = enableNativeMapBuildings
         }
     }
-    
+
     public var useMapsIndoorsStyle: Bool = true
 
     private var mapboxTransitionHandler: MapboxWorldTransitionHandler?
@@ -114,15 +114,15 @@ public class MapBoxProvider: MPMapProvider {
         positionPresenter = MBPositionPresenter(map: self.mapView?.mapboxMap)
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
-        
+
         onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [self] _ in
-            if self.useMapsIndoorsStyle == false {
+            if useMapsIndoorsStyle == false {
                 Task {
                     await self.verifySetup()
                 }
             }
         }
-        
+
         Task {
             await self.verifySetup()
         }

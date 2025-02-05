@@ -24,10 +24,9 @@ import MapsIndoors
     func setShowRoadLabels(show: Bool) {
         (mapProvider as? MapBoxProvider)?.showMapboxRoadLabels = show
     }
-    
+
     /// Set whether to use the MapsIndoors Mapbox map style. If set to `false`, the MapsIndoors SDK will not attempt to apply any Mapbox map style, only layers/sources to render MapsIndoors content. Default is `true`.
     func useMapsIndoorsStyle(value: Bool) {
         (mapProvider as? MapBoxProvider)?.useMapsIndoorsStyle = value
     }
-    
 }
