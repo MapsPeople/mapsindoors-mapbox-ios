@@ -1,6 +1,6 @@
 import Foundation
 import MapboxMaps
-import MapsIndoorsCore
+@_spi(Private) import MapsIndoorsCore
 
 class MBTileProvider {
     private weak var mapView: MapView?
@@ -41,13 +41,23 @@ class MBTileProvider {
     }
 
     private func updateSource() throws {
-        if templateUrl != _tileProvider.templateUrl() {
-            templateUrl = _tileProvider.templateUrl()
-            rasterSource.tiles = [templateUrl]
-            rasterSource.tileSize = _tileProvider.tileSize()
-            rasterSource.volatile = false
+        
+        if Reachability.isConnectedToNetwork() {
+            if templateUrl != _tileProvider.templateUrl() {
+                templateUrl = _tileProvider.templateUrl()
+                rasterSource.tiles = [templateUrl]
+                rasterSource.tileSize = _tileProvider.tileSize()
+                rasterSource.volatile = false
+            }
+        } else {
+            if templateUrl != _tileProvider.offlineTemplateUrl() {
+                templateUrl = _tileProvider.offlineTemplateUrl()
+                rasterSource.tiles = [templateUrl]
+                rasterSource.tileSize = 256
+                rasterSource.volatile = true
+            }
         }
-
+        
         if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.tileSource) == false {
             try mapView?.mapboxMap.addSource(rasterSource)
             return

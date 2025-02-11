@@ -135,19 +135,13 @@ public class MapBoxProvider: MPMapProvider {
 
     @MainActor
     private func verifySetup() async {
-        if mapView?.mapboxMap.isStyleLoaded ?? false, mapView?.mapboxMap.styleURI?.rawValue == styleUrl {
-            return
-        }
         await loadMapbox()
     }
 
     @MainActor
     public func loadMapbox() async {
-        guard mapView?.mapboxMap.styleURI?.rawValue != styleUrl else {
-            return
-        }
 
-        if useMapsIndoorsStyle {
+        if useMapsIndoorsStyle && MPNetworkReachabilityManager.shared().isReachable {
             await withCheckedContinuation { continuation in
                 mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
                     continuation.resume()
