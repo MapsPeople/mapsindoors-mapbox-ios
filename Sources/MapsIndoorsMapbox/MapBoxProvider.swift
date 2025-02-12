@@ -1,4 +1,5 @@
 import Foundation
+import MapsIndoors
 import MapsIndoorsCore
 @_spi(Experimental) import MapboxMaps
 
@@ -126,6 +127,8 @@ public class MapBoxProvider: MPMapProvider {
         Task {
             await self.verifySetup()
         }
+        
+        registerLocalFallbackFontWith(filenameString: "OpenSans-Bold.ttf", bundleIdentifierString: "Fonts")
     }
 
     private let styleUrl = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
@@ -258,6 +261,21 @@ public class MapBoxProvider: MPMapProvider {
             }
             try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions())
         } catch {}
+    }
+    
+    private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString: String) {
+        if let bundle = MapsIndoorsBundle.bundle {
+            let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil)
+            if let fontData = NSData(contentsOfFile: pathForResourceString!), let dataProvider = CGDataProvider.init(data: fontData) {
+                let fontRef = CGFont.init(dataProvider)
+                var errorRef: Unmanaged<CFError>? = nil
+                if (CTFontManagerRegisterGraphicsFont(fontRef!, &errorRef) == false) {
+                    print("Failed to register font - register graphics font failed - this font may have already been registered in the main bundle.")
+                }
+            }
+        } else {
+            print("Failed to register font - bundle identifier invalid.")
+        }
     }
 }
 

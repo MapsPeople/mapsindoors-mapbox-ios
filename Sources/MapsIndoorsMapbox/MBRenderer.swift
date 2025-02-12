@@ -209,7 +209,7 @@ class MBRenderer {
             layerUpdate.textOffset = .expression(Exp(.get) { Key.labelOffset.rawValue })
             layerUpdate.symbolSortKey = .expression(Exp(.get) { Key.markerGeometryArea.rawValue })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
-            layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular"])
+            layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
             layerUpdate.textLetterSpacing = .constant(-0.01)
             layerUpdate.slot = .middle
             layerUpdate.symbolZElevate = .constant(true)
