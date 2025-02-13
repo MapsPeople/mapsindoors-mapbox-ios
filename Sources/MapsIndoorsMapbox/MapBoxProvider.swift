@@ -1,5 +1,4 @@
 import Foundation
-import MapsIndoors
 import MapsIndoorsCore
 @_spi(Experimental) import MapboxMaps
 
@@ -75,12 +74,13 @@ public class MapBoxProvider: MPMapProvider {
 
     let d = DispatchQueue(label: "mdf", qos: .userInteractive)
 
-    private var lastSetViewModels = [any MPViewModel]()
+//    private var lastSetViewModels = [any MPViewModel]()
     public func setViewModels(models: [any MPViewModel], forceClear _: Bool) async {
-        d.async {
-            self.lastSetViewModels.removeAll(keepingCapacity: true)
-            self.lastSetViewModels.append(contentsOf: models)
-        }
+//        d.async { [weak self] in
+//            guard let self else { return }
+//            self.lastSetViewModels.removeAll(keepingCapacity: true)
+//            self.lastSetViewModels.append(contentsOf: models)
+//        }
 
         if let r = renderer {
             await configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
@@ -116,19 +116,17 @@ public class MapBoxProvider: MPMapProvider {
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
 
-        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [self] _ in
-            if useMapsIndoorsStyle == false {
-                Task {
-                    await self.verifySetup()
+        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [weak self] _ in
+            if self?.useMapsIndoorsStyle == false {
+                Task { [weak self] in
+                    await self?.verifySetup()
                 }
             }
         }
 
-        Task {
-            await self.verifySetup()
+        Task { [weak self] in
+            await self?.verifySetup()
         }
-        
-        registerLocalFallbackFontWith(filenameString: "OpenSans-Bold.ttf", bundleIdentifierString: "Fonts")
     }
 
     private let styleUrl = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
@@ -138,15 +136,25 @@ public class MapBoxProvider: MPMapProvider {
 
     @MainActor
     private func verifySetup() async {
+        if mapView?.mapboxMap.isStyleLoaded ?? false, mapView?.mapboxMap.styleURI?.rawValue == styleUrl {
+            return
+        }
         await loadMapbox()
     }
 
     @MainActor
     public func loadMapbox() async {
+        guard mapView?.mapboxMap.styleURI?.rawValue != styleUrl else {
+            return
+        }
 
-        if useMapsIndoorsStyle && MPNetworkReachabilityManager.shared().isReachable {
-            await withCheckedContinuation { continuation in
-                mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
+        if useMapsIndoorsStyle {
+            await withCheckedContinuation { [weak self] continuation in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                self.mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: self.styleUrl)!)!) { _ in
                     continuation.resume()
                 }
             }
@@ -158,14 +166,14 @@ public class MapBoxProvider: MPMapProvider {
         mapView?.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(onMapClick)))
 
         cameraChangedCancellable = mapView?.mapboxMap.onCameraChanged.observe { _ in
-            Task.detached(priority: .userInitiated) {
-                self.delegate?.cameraChangedPosition()
-                await self.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
+            Task.detached(priority: .userInitiated) { [weak self] in
+                self?.delegate?.cameraChangedPosition()
+                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
             }
         }
         cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { _ in
-            Task.detached(priority: .userInitiated) {
-                self.delegate?.cameraIdle()
+            Task.detached(priority: .userInitiated) { [weak self] in
+                self?.delegate?.cameraIdle()
             }
         }
 
@@ -182,9 +190,11 @@ public class MapBoxProvider: MPMapProvider {
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
 
         var lastModels = [any MPViewModel]()
-        d.sync {
-            lastModels.append(contentsOf: self.lastSetViewModels)
-        }
+//        lastModels.append(contentsOf: self.lastSetViewModels)
+//        d.sync { [weak self] in
+//            guard let self else { return }
+//            lastModels.append(contentsOf: self.lastSetViewModels)
+//        }
 
         await setViewModels(models: lastModels, forceClear: true)
     }
@@ -261,21 +271,6 @@ public class MapBoxProvider: MPMapProvider {
             }
             try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions())
         } catch {}
-    }
-    
-    private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString: String) {
-        if let bundle = MapsIndoorsBundle.bundle {
-            let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil)
-            if let fontData = NSData(contentsOfFile: pathForResourceString!), let dataProvider = CGDataProvider.init(data: fontData) {
-                let fontRef = CGFont.init(dataProvider)
-                var errorRef: Unmanaged<CFError>? = nil
-                if (CTFontManagerRegisterGraphicsFont(fontRef!, &errorRef) == false) {
-                    print("Failed to register font - register graphics font failed - this font may have already been registered in the main bundle.")
-                }
-            }
-        } else {
-            print("Failed to register font - bundle identifier invalid.")
-        }
     }
 }
 

@@ -36,9 +36,9 @@ class MBRenderer {
         self.provider = provider
         self.mapView = mapView
 
-        onImageUnusedCancelable = map?.onStyleImageRemoveUnused.observe { image in
-            Task { @MainActor in
-                try self.map?.removeImage(withId: image.imageId)
+        onImageUnusedCancelable = map?.onStyleImageRemoveUnused.observe { [weak self] image in
+            Task { @MainActor [weak self] in
+                try self?.map?.removeImage(withId: image.imageId)
             }
         }
 
@@ -60,12 +60,6 @@ class MBRenderer {
         }
 
         configureForCollisionHandling(overlap: collisionHandling)
-
-        cancellable = NotificationCenter.default
-            .publisher(for: Notification.Name(rawValue: "click"))
-            .sink { _ in
-                self.enabled = !(self.enabled)
-            }
     }
 
     private func setupLayersInOrder() throws {
@@ -209,7 +203,7 @@ class MBRenderer {
             layerUpdate.textOffset = .expression(Exp(.get) { Key.labelOffset.rawValue })
             layerUpdate.symbolSortKey = .expression(Exp(.get) { Key.markerGeometryArea.rawValue })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
-            layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
+            layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular"])
             layerUpdate.textLetterSpacing = .constant(-0.01)
             layerUpdate.slot = .middle
             layerUpdate.symbolZElevate = .constant(true)
@@ -481,7 +475,8 @@ class MBRenderer {
     var featureExtrusionOpacity: Double = 0 {
         didSet {
             if oldValue != featureExtrusionOpacity {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     do {
                         try self.map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
                             layer.fillExtrusionOpacity = .constant(self.featureExtrusionOpacity)
@@ -495,7 +490,8 @@ class MBRenderer {
     var wallExtrusionOpacity: Double = 0 {
         didSet {
             if oldValue != wallExtrusionOpacity {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     do {
                         try self.map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
                             layer.fillExtrusionOpacity = .constant(self.wallExtrusionOpacity)
@@ -509,7 +505,8 @@ class MBRenderer {
     var collisionHandling: MPCollisionHandling = .allowOverLap {
         didSet {
             if oldValue != collisionHandling {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     self.configureForCollisionHandling(overlap: self.collisionHandling)
                 }
             }
@@ -588,7 +585,7 @@ class MBRenderer {
     let d = DispatchQueue(label: "mdf", qos: .userInteractive)
 
     // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
-    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 5_000)
+//    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 5_000)
     func render(models: [any MPViewModel]) async throws {
         try Task.checkCancellation()
         let startTime = DispatchTime.now()
@@ -596,15 +593,16 @@ class MBRenderer {
         try Task.checkCancellation()
         let models = await withTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
             for model in models {
-                _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [self] in
+                _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [weak self] in
+                    guard let self else { return ([], [], [], [], [], []) }
 
                     d.async { _ = self._lastModels.insert(model) }
                     updateInfoWindow(for: model)
 
-                    let md5 = model.md5
-                    if let cacheHit = modelCache[md5] {
-                        return cacheHit
-                    }
+//                    let md5 = model.md5
+//                    if let cacheHit = modelCache[md5] {
+//                        return cacheHit
+//                    }
 
                     updateImage(for: model)
                     update2DModel(for: model)
@@ -653,7 +651,7 @@ class MBRenderer {
 
                     let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
 
-                    modelCache[md5] = result
+//                    modelCache[md5] = result
 
                     return result
                 }
@@ -703,7 +701,8 @@ class MBRenderer {
     }
 
     private func removeInfoWindow(for model: any MPViewModel) {
-        DispatchQueue.main.async {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             if let annotationView = self.mapView?.viewAnnotations.view(forId: MBRenderer.infoWindowPrefix + model.id) {
                 self.mapView?.viewAnnotations.remove(annotationView)
             }
@@ -722,7 +721,8 @@ class MBRenderer {
     }
 
     private func createOrUpdateInfoWindow(for model: any MPViewModel, at point: MPPoint, location: MPLocation) {
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             var yOffset = 0.0
             var xOffset = 0.0
 
@@ -808,36 +808,40 @@ class MBRenderer {
         }
     }
 
-    var cancellable: AnyCancellable?
-
     private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) throws {
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
         }
 
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
         }
 
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
         }
 
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
         }
 
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
         }
 
         try Task.checkCancellation()
-        DispatchQueue.main.async { [self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
         }
     }
@@ -997,7 +1001,8 @@ private extension MapboxMap {
                 MPLog.mapbox.error("Error adding/updating image: \(error.localizedDescription)")
             }
         } else {
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 do {
                     if let stretchX, let stretchY, let content {
                         try self.addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)

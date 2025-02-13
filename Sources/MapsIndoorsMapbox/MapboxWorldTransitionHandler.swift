@@ -12,8 +12,8 @@ class MapboxWorldTransitionHandler {
     weak var map: MapBoxProvider?
     var enableMapboxBuildings = true {
         didSet {
-            Task {
-                await self.configureMapsIndoorsVsMapboxVisiblity()
+            Task { [weak self] in
+                await self?.configureMapsIndoorsVsMapboxVisiblity()
             }
         }
     }
