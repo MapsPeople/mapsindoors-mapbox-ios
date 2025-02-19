@@ -478,7 +478,7 @@ class MBRenderer {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
-                        try self.map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
+                        try map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
                             layer.fillExtrusionOpacity = .constant(self.featureExtrusionOpacity)
                         }
                     } catch {}
@@ -493,7 +493,7 @@ class MBRenderer {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
-                        try self.map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
+                        try map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
                             layer.fillExtrusionOpacity = .constant(self.wallExtrusionOpacity)
                         }
                     } catch {}
@@ -507,7 +507,7 @@ class MBRenderer {
             if oldValue != collisionHandling {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.configureForCollisionHandling(overlap: self.collisionHandling)
+                    configureForCollisionHandling(overlap: collisionHandling)
                 }
             }
         }
@@ -703,8 +703,8 @@ class MBRenderer {
     private func removeInfoWindow(for model: any MPViewModel) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let annotationView = self.mapView?.viewAnnotations.view(forId: MBRenderer.infoWindowPrefix + model.id) {
-                self.mapView?.viewAnnotations.remove(annotationView)
+            if let annotationView = mapView?.viewAnnotations.view(forId: MBRenderer.infoWindowPrefix + model.id) {
+                mapView?.viewAnnotations.remove(annotationView)
             }
         }
     }
@@ -1005,9 +1005,9 @@ private extension MapboxMap {
                 guard let self else { return }
                 do {
                     if let stretchX, let stretchY, let content {
-                        try self.addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
+                        try addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
                     } else {
-                        try self.addImage(image, id: id)
+                        try addImage(image, id: id)
                     }
                 } catch {
                     MPLog.mapbox.error("Error adding/updating image: \(error.localizedDescription)")

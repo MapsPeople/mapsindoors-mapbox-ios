@@ -41,7 +41,6 @@ class MBTileProvider {
     }
 
     private func updateSource() throws {
-        
         if Reachability.isConnectedToNetwork() {
             if templateUrl != _tileProvider.templateUrl() {
                 templateUrl = _tileProvider.templateUrl()
@@ -57,7 +56,7 @@ class MBTileProvider {
                 rasterSource.volatile = true
             }
         }
-        
+
         if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.tileSource) == false {
             try mapView?.mapboxMap.addSource(rasterSource)
             return

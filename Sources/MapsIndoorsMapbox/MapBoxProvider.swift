@@ -128,7 +128,7 @@ public class MapBoxProvider: MPMapProvider {
         Task { [weak self] in
             await self?.verifySetup()
         }
-        
+
         registerLocalFallbackFontWith(filenameString: "OpenSans-Bold.ttf", bundleIdentifierString: "Fonts")
     }
 
@@ -144,14 +144,13 @@ public class MapBoxProvider: MPMapProvider {
 
     @MainActor
     public func loadMapbox() async {
-
-        if useMapsIndoorsStyle && MPNetworkReachabilityManager.shared().isReachable {
+        if useMapsIndoorsStyle, MPNetworkReachabilityManager.shared().isReachable {
             await withCheckedContinuation { [weak self] continuation in
                 guard let self else {
                     continuation.resume()
                     return
                 }
-                self.mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: self.styleUrl)!)!) { _ in
+                mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
                     continuation.resume()
                 }
             }
@@ -269,14 +268,14 @@ public class MapBoxProvider: MPMapProvider {
             try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions())
         } catch {}
     }
-    
-    private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString: String) {
+
+    private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString _: String) {
         if let bundle = MapsIndoorsBundle.bundle {
             let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil)
-            if let fontData = NSData(contentsOfFile: pathForResourceString!), let dataProvider = CGDataProvider.init(data: fontData) {
-                let fontRef = CGFont.init(dataProvider)
+            if let fontData = NSData(contentsOfFile: pathForResourceString!), let dataProvider = CGDataProvider(data: fontData) {
+                let fontRef = CGFont(dataProvider)
                 var errorRef: Unmanaged<CFError>? = nil
-                if (CTFontManagerRegisterGraphicsFont(fontRef!, &errorRef) == false) {
+                if CTFontManagerRegisterGraphicsFont(fontRef!, &errorRef) == false {
                     print("Failed to register font - register graphics font failed - this font may have already been registered in the main bundle.")
                 }
             }
