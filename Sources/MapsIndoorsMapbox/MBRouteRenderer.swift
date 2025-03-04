@@ -24,6 +24,7 @@ class MBRouteRenderer: MPRouteRenderer {
     required init(mapView: MapView?) {
         self.mapView = mapView
         configureSources()
+        self.mapView?.mapboxMap.addMapsIndoorsLayers()
     }
 
     func configureSources() {

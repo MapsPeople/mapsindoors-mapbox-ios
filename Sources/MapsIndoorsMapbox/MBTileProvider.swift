@@ -14,19 +14,8 @@ class MBTileProvider {
         self.mapProvider = mapProvider
         _tileProvider = tileProvider
         rasterSource = RasterSource(id: Constants.SourceIDs.tileSource)
-        setupLayer()
+        self.mapView?.mapboxMap.addMapsIndoorsLayers()
         update()
-    }
-
-    private func setupLayer() {
-        if !(mapView?.mapboxMap.layerExists(withId: Constants.LayerIDs.tileLayer) ?? false) {
-            let tileLayer = RasterLayer(id: Constants.LayerIDs.tileLayer, source: Constants.SourceIDs.tileSource)
-            do {
-                try mapView?.mapboxMap.addLayer(tileLayer)
-            } catch {
-                MPLog.mapbox.error(error.localizedDescription)
-            }
-        }
     }
 
     func update() {
