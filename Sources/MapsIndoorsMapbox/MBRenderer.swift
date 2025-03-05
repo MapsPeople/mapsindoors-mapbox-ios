@@ -41,7 +41,7 @@ class MBRenderer {
                 try self?.map?.removeImage(withId: image.imageId)
             }
         }
-        
+
         map?.addMapsIndoorsLayers()
 
         do {

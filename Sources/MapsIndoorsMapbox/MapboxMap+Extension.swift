@@ -2,7 +2,6 @@
 @_spi(Private) import MapsIndoorsCore
 
 extension MapboxMap {
-    
     func addMapsIndoorsLayers() {
         // Tile
         let tileLayer = RasterLayer(id: Constants.LayerIDs.tileLayer, source: Constants.SourceIDs.tileSource)
@@ -73,13 +72,12 @@ extension MapboxMap {
 
         for layer in layersInAscendingOrder {
             do {
-                if self.layerExists(withId: layer.id) == false {
-                    try self.addPersistentLayer(layer)
+                if layerExists(withId: layer.id) == false {
+                    try addPersistentLayer(layer)
                 }
             } catch {
                 MPLog.mapbox.debug(error.localizedDescription)
             }
         }
     }
-    
 }
