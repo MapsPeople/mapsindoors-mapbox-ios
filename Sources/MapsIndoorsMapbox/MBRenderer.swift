@@ -127,7 +127,7 @@ class MBRenderer {
             layerUpdate.textAnchor = .expression(Exp(.get) { Key.labelAnchor.rawValue })
             layerUpdate.textJustify = .constant(TextJustify.left)
             layerUpdate.textOffset = .expression(Exp(.get) { Key.labelOffset.rawValue })
-            layerUpdate.symbolSortKey = .expression(Exp(.get) { Key.markerGeometryArea.rawValue })
+            layerUpdate.symbolSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.markerGeometryArea.rawValue } })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
             layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
             layerUpdate.textLetterSpacing = .constant(-0.01)
@@ -154,7 +154,7 @@ class MBRenderer {
             layerUpdate.textField = .expression(Exp(.get) { Key.markerLabel.rawValue })
             layerUpdate.textAnchor = .constant(TextAnchor.center)
             layerUpdate.textJustify = .constant(TextJustify.center)
-            layerUpdate.symbolSortKey = .expression(Exp(.get) { Key.markerGeometryArea.rawValue })
+            layerUpdate.symbolSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.markerGeometryArea.rawValue } })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
 
             layerUpdate.textColor = .expression(Exp(.get) { Key.labelColor.rawValue })
@@ -230,7 +230,7 @@ class MBRenderer {
             layerUpdate.textField = .expression(Exp(.get) { Key.markerLabel.rawValue })
             layerUpdate.textAnchor = .constant(TextAnchor.center)
             layerUpdate.textJustify = .constant(TextJustify.center)
-            layerUpdate.symbolSortKey = .expression(Exp(.get) { Key.markerGeometryArea.rawValue })
+            layerUpdate.symbolSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.markerGeometryArea.rawValue } })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
 
             layerUpdate.textSize = .expression(Exp(.get) { Key.labelSize.rawValue })
@@ -614,12 +614,9 @@ class MBRenderer {
             features3DModels.append(contentsOf: x.5)
         }
 
-        try Task.checkCancellation()
-
         let elapsedTimeInNanoSec = DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds
         let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000_000
-        let loadingMeasurementInSec = round(elapsedTimeInMilliSec * 100) / 100
-        MPLog.mapbox.debug("ViewModel to Feature took \(loadingMeasurementInSec) seconds")
+        MPLog.mapbox.measure("ViewModel to Feature", timeMs: elapsedTimeInMilliSec)
 
         try Task.checkCancellation()
 
