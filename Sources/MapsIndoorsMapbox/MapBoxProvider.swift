@@ -4,6 +4,7 @@ import MapsIndoorsCore
 @_spi(Experimental) import MapboxMaps
 
 public class MapBoxProvider: MPMapProvider {
+
     public let model2DResolutionLimit = 500
 
     public var enableNativeMapBuildings: Bool = true {
@@ -281,6 +282,25 @@ public class MapBoxProvider: MPMapProvider {
             }
         } else {
             print("Failed to register font - bundle identifier invalid.")
+        }
+    }
+
+    public func applyClippingGeometries(_ geometries: [MPPolygonGeometry]) async {
+        let isClippingAllowed = MPMapsIndoors.shared.solution?.modules.contains("cliplayer") ?? false
+        guard let mapView = mapView, isClippingAllowed == true else { return }
+            
+        var features = [Feature]()
+        for geometry in geometries {
+            let coordinates = geometry.coordinates.map { $0.map { $0.coordinate } }
+            let feature = Feature(geometry: Polygon(coordinates))
+            features.append(feature)
+        }
+        
+        let newGeoJSON: GeoJSONObject = .featureCollection(FeatureCollection(features: features)).geoJSONObject
+        
+        await MainActor.run {
+            mapView.mapboxMap?.updateGeoJSONSource(withId: Constants.SourceIDs.clippingSource,
+                                                   geoJSON: newGeoJSON)
         }
     }
 }

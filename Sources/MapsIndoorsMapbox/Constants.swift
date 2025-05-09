@@ -12,6 +12,7 @@ enum Constants {
         static let floorPlanFillLayer = "FLOORPLAN_FILL_LAYER"
         static let floorPlanLineLayer = "FLOORPLAN_LINE_LAYER"
         static let model2DLayer = "MODEL_2D_LAYER"
+        static let model2DElevatedLayer = "MODEL_2D_ELEVATED_LAYER"
         static let model3DLayer = "MODEL_3D_LAYER"
         static let circleLayer = "CIRCLE_LAYER"
         static let blueDotLayer = "BLUEDOT_LAYER"
@@ -22,6 +23,8 @@ enum Constants {
         static let lineLayer = "ROUTE_POLYLINE_LAYER"
         static let animatedLineLayer = "ROUTE_ANIMATED_POLYLINE_LAYER"
         static let routeMarkerLayer = "ROUTE_MARKER_LAYER"
+        
+        static let clippingLayer = "CLIPPING_LAYER"
     }
 
     enum SourceIDs {
@@ -39,6 +42,9 @@ enum Constants {
         static let lineSource = "ROUTE_POLYLINE_SOURCE"
         static let animatedLineSource = "ROUTE_ANIMATED_POLYLINE_SOURCE"
         static let routeMarkerSource = "ROUTE_MARKER_SOURCE"
+        
+        // Clipping source
+        static let clippingSource = "CLIPPING_SOURCE"
     }
 
     enum BlueDotProperties {

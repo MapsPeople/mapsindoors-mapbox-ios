@@ -19,6 +19,7 @@ class MBRenderer {
     private var _model3dGeoJsonSource: GeoJSONSource?
     private var _extrusionGeoJsonSource: GeoJSONSource?
     private var _wallsGeoJsonSource: GeoJSONSource?
+    private var _clippingSource: GeoJSONSource?
     private weak var mapView: MapView?
 
     private var _lastModels = Set<AnyHashable>()
@@ -53,6 +54,7 @@ class MBRenderer {
             try configurePolygonLayers()
             try configureFloorPlanLayer()
             try configure2DModelLayer()
+            try configure2DModelElevatedLayer()
             try configure3DModelLayer()
             try configureWallExtrusionLayer()
             try configureFeatureExtrusionLayer()
@@ -93,6 +95,9 @@ class MBRenderer {
         _wallsGeoJsonSource?.data = nil
         _wallsGeoJsonSource?.tolerance = 0.2
         try map?.addSource(_wallsGeoJsonSource!)
+        
+        _clippingSource = GeoJSONSource(id: Constants.SourceIDs.clippingSource)
+        try map?.addSource(_clippingSource!)
     }
 
     // MARK: Layers: adding and setting properties
@@ -357,9 +362,71 @@ class MBRenderer {
                 }
             )
 
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+            layerUpdate.filter = Exp(.all) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.model2DIsElevated.rawValue }
+                    false
+                }
+            }
+        }
+    }
+    
+    private func configure2DModelElevatedLayer() throws {
+        try map?.updateLayer(withId: Constants.LayerIDs.model2DElevatedLayer, type: SymbolLayer.self) { layerUpdate in
+            layerUpdate.iconAllowOverlap = .constant(true)
+            layerUpdate.textAllowOverlap = .constant(true)
+            layerUpdate.iconImage = .expression(Exp(.get) { Key.model2dId.rawValue })
+            layerUpdate.iconRotate = .expression(Exp(.get) { Key.model2dBearing.rawValue })
+            layerUpdate.iconPitchAlignment = .constant(.map)
+            layerUpdate.iconRotationAlignment = .constant(.map)
+            layerUpdate.slot = .middle
+
+            layerUpdate.symbolZElevate = .constant(true)
+            
+            let stops: [Double: Exp] = [
+                1: Exp(.product) {
+                    Exp(.literal) { MBRenderer.zoom22Scale }
+                    Exp(.get) { Key.model2DScale.rawValue }
+                },
+                22: Exp(.product) {
+                    Exp(.literal) { 1 }
+                    Exp(.get) { Key.model2DScale.rawValue }
+                },
+                23: Exp(.product) {
+                    Exp(.literal) { 2 }
+                    Exp(.get) { Key.model2DScale.rawValue }
+                },
+                24: Exp(.product) {
+                    Exp(.literal) { 4 }
+                    Exp(.get) { Key.model2DScale.rawValue }
+                },
+                25: Exp(.product) {
+                    Exp(.literal) { 8 }
+                    Exp(.get) { Key.model2DScale.rawValue }
+                }
+            ]
+
+            layerUpdate.iconSize = .expression(
+                Exp(.interpolate) {
+                    Exp(.exponential) { 2 }
+                    Exp(.zoom)
+                    stops
+                }
+            )
+
+            layerUpdate.filter = Exp(.all) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.model2DIsElevated.rawValue}
+                    true
+                }
             }
         }
     }
