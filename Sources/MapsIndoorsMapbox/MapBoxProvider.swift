@@ -291,7 +291,7 @@ public class MapBoxProvider: MPMapProvider {
             
         var features = [Feature]()
         for geometry in geometries {
-            let coordinates = geometry.coordinates.map { $0.map { $0.coordinate } }
+            let coordinates = geometry.coordinates.map { $0.map(\.coordinate) }
             let feature = Feature(geometry: Polygon(coordinates))
             features.append(feature)
         }

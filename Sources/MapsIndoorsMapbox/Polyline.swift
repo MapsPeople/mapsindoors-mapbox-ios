@@ -366,11 +366,11 @@ enum PolylineError: Error {
 }
 
 private func toCoordinates(_ locations: [CLLocation]) -> [CLLocationCoordinate2D] {
-    return locations.map {location in location.coordinate}
+    locations.map(\.coordinate)
 }
 
 private func toLocations(_ coordinates: [CLLocationCoordinate2D]) -> [CLLocation] {
-    return coordinates.map { coordinate in
+    coordinates.map { coordinate in
         CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
     }
 }
