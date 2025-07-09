@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 @_spi(Experimental) import MapboxMaps
-@_spi(Private) import MapsIndoorsCore
+@_spi(Private) @preconcurrency import MapsIndoorsCore
 import UIKit
 
 private class InfoWindowTapRecognizer: UITapGestureRecognizer {
@@ -26,7 +26,7 @@ class MBRenderer {
     private var lock = UnfairLock()
 
     // Dictionary to store created info windows
-    private var infoWindows = MPThreadSafeDictionary<String, UIView>()
+    private var infoWindows = MPThreadSafeDictionary<String, ViewAnnotation>()
 
     private weak var provider: MapBoxProvider?
 
@@ -516,16 +516,19 @@ class MBRenderer {
     }
 
     private func configureForCollisionHandling(overlap: MPCollisionHandling) {
-        let settings: MBOverlapSettings = switch overlap {
-        case .removeIconFirst:
-            MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: true, textOptional: false)
-        case .removeLabelFirst:
-            MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: false, textOptional: true)
-        case .removeIconAndLabel:
-            MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: false, textOptional: false)
-        case .allowOverLap:
-            MBOverlapSettings(iconAllowOverlap: true, textAllowOverlap: true, iconOptional: false, textOptional: false)
-        }
+        let settings =
+            switch overlap {
+            case .removeIconFirst:
+                MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: true, textOptional: false)
+            case .removeLabelFirst:
+                MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: false, textOptional: true)
+            case .removeIconAndLabel:
+                MBOverlapSettings(iconAllowOverlap: false, textAllowOverlap: false, iconOptional: false, textOptional: false)
+            case .allowOverLap:
+                MBOverlapSettings(iconAllowOverlap: true, textAllowOverlap: true, iconOptional: false, textOptional: false)
+            @unknown default:
+                MBOverlapSettings(iconAllowOverlap: true, textAllowOverlap: true, iconOptional: false, textOptional: false)  // As default .allowOverlap
+            }
 
         do {
             try updateLayerOverlapSettings(settings)
@@ -693,8 +696,9 @@ class MBRenderer {
     private func removeInfoWindow(for model: any MPViewModel) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let annotationView = mapView?.viewAnnotations.view(forId: MBRenderer.infoWindowPrefix + model.id) {
-                mapView?.viewAnnotations.remove(annotationView)
+            if let infoWindow = infoWindows[model.id] {
+                infoWindow.remove()
+                infoWindows.removeValue(forKey: model.id)
             }
         }
     }
@@ -706,7 +710,6 @@ class MBRenderer {
             }
         } else {
             removeInfoWindow(for: model)
-            infoWindows.removeValue(forKey: model.id)
         }
     }
 
@@ -739,31 +742,30 @@ class MBRenderer {
                     }
                 }
             }
-
-            let options = ViewAnnotationOptions(
-                geometry: Point(point.coordinate),
-                allowOverlap: false,
-                anchor: .bottom,
-                offsetX: xOffset,
-                offsetY: yOffset
-            )
-
-            let infoWindowView = infoWindows[model.id]
-
-            if infoWindowView == nil {
-                if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
-                    infoWindows[model.id] = infoWindowView
-                }
-            }
-
-            if let view = infoWindowView {
-                let viewId = MBRenderer.infoWindowPrefix + model.id
-                if let existingView = mapView?.viewAnnotations.view(forId: viewId) {
-                    try? mapView?.viewAnnotations.update(existingView, options: options)
-                } else {
-                    try? mapView?.viewAnnotations.add(view, id: viewId, options: options)
-                }
-                setupInfoWindowTapRecognizer(infoWindowView: view, modelId: model.id)
+            
+            guard infoWindows[model.id] == nil else { return }
+            
+            if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
+                
+                let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
+                
+                // Ensure it is shown dispite anything else
+                view.allowZElevate = true
+                view.allowOverlap = true
+                view.ignoreCameraPadding = true
+                view.allowOverlapWithPuck = true
+                
+                // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
+                view.variableAnchors = [
+                    ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: xOffset, offsetY: yOffset)
+                ]
+                
+                // Remember the view annotation
+                infoWindows[model.id] = view
+                
+                // Add the view annotation to the map
+                mapView?.viewAnnotations.add(view)
+                setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: model.id)
             }
         }
     }

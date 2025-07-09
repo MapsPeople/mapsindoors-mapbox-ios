@@ -186,14 +186,15 @@ public class MapBoxProvider: MPMapProvider {
 
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
 
-        var lastModels = [any MPViewModel]()
+//        var lastModels = [any MPViewModel]()
 //        lastModels.append(contentsOf: self.lastSetViewModels)
 //        d.sync { [weak self] in
 //            guard let self else { return }
 //            lastModels.append(contentsOf: self.lastSetViewModels)
 //        }
 
-        await setViewModels(models: lastModels, forceClear: true)
+//        await setViewModels(models: lastModels, forceClear: true)
+        await setViewModels(models: [], forceClear: true)
     }
 
     @objc func onMapClick(_ sender: UITapGestureRecognizer) {

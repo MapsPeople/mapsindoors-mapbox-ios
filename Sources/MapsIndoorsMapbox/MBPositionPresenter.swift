@@ -127,7 +127,7 @@ class MBPositionPresenter: MPPositionPresenter {
             }
 
             if map.layerExists(withId: LAYER_BLUEDOT_MARKER) == false {
-                var markerLayer = SymbolLayer(id: LAYER_BLUEDOT_MARKER, source: SRC_BLUEDOT_MARKER)
+                let markerLayer = SymbolLayer(id: LAYER_BLUEDOT_MARKER, source: SRC_BLUEDOT_MARKER)
                 try map.addLayer(markerLayer, layerPosition: .above(LAYER_BLUEDOT_CIRCLE))
             }
 

@@ -127,7 +127,7 @@ struct Destination: Codable {
 
 extension MapboxDistanceMatrix {
     func asMPDistanceMatrix(originsCount: Int) -> MPDistanceMatrixResult {
-        var mpMatrix = MPDistanceMatrixResult()
+        let mpMatrix = MPDistanceMatrixResult()
 
         let destinations = (distances?.count ?? 0) - originsCount
         mpMatrix.origin_addresses = sources?[..<originsCount].map { $0.name ?? "" } ?? []
@@ -145,9 +145,9 @@ extension MapboxDistanceMatrix {
                     let distance = distanceMatrix[j][i]
                     let duration = durationMatrix[j][i]
 
-                    var mpDist = MPRoutePropertyInternal(withValue: NSNumber(value: distance), withText: Measurement(value: distance, unit: UnitLength.meters).converted(to: UnitLength.kilometers).description)
+                    let mpDist = MPRoutePropertyInternal(withValue: NSNumber(value: distance), withText: Measurement(value: distance, unit: UnitLength.meters).converted(to: UnitLength.kilometers).description)
 
-                    var mpDur = MPRoutePropertyInternal(withValue: NSNumber(value: duration), withText: Measurement(value: duration, unit: UnitDuration.seconds).converted(to: UnitDuration.hours).description)
+                    let mpDur = MPRoutePropertyInternal(withValue: NSNumber(value: duration), withText: Measurement(value: duration, unit: UnitDuration.seconds).converted(to: UnitDuration.hours).description)
 
                     var mpElem = MPDistanceMatrixElements()
                     mpElem.distance = mpDist

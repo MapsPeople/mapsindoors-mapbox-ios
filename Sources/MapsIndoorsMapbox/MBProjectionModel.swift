@@ -57,6 +57,6 @@ class MBProjectionModel: MPProjection {
 
     @MainActor
     func pointFor(coordinate: CLLocationCoordinate2D) async -> CGPoint {
-        view?.mapboxMap.point(for: coordinate) ?? CGPointZero
+        view?.mapboxMap.point(for: coordinate) ?? .zero
     }
 }
