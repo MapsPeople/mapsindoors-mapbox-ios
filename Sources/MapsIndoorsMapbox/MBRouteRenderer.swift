@@ -35,7 +35,7 @@ class MBRouteRenderer: MPRouteRenderer {
 
         if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) == false {
             var lineSource = GeoJSONSource(id: Constants.SourceIDs.lineSource)
-            lineSource.data = .geometry(Geometry.multiPoint(MultiPoint([LocationCoordinate2D]())))
+            lineSource.data = .geometry(LineString([]).geometry)
             do {
                 try mapView.mapboxMap.addSource(lineSource)
             } catch {
@@ -45,7 +45,7 @@ class MBRouteRenderer: MPRouteRenderer {
 
         if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) == false {
             var animatedSource = GeoJSONSource(id: Constants.SourceIDs.animatedLineSource)
-            animatedSource.data = .geometry(Geometry.multiPoint(MultiPoint([LocationCoordinate2D]())))
+            animatedSource.data = .geometry(LineString([]).geometry)
             do {
                 try mapView.mapboxMap.addSource(animatedSource)
             } catch {
@@ -70,7 +70,7 @@ class MBRouteRenderer: MPRouteRenderer {
         route = model.polyline
 
         // Draw line
-        let geom = Geometry.multiPoint(MultiPoint(route))
+        let geom = LineString(route).geometry
 
         do {
             if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) ?? false {
@@ -200,7 +200,7 @@ class MBRouteRenderer: MPRouteRenderer {
                                                           }
 
                                                           DispatchQueue.main.async {
-                                                              let geom = Geometry.multiPoint(MultiPoint(points))
+                                                              let geom = LineString(points).geometry
                                                               if self.mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) ?? false {
                                                                   self.mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.animatedLineSource, geoJSON: GeoJSONObject.geometry(geom))
                                                               }
@@ -250,7 +250,7 @@ class MBRouteRenderer: MPRouteRenderer {
         valueAnimator = nil
         do {
             // Clear polyline
-            let geom = Geometry.multiPoint(MultiPoint([LocationCoordinate2D]()))
+            let geom = LineString([]).geometry
             if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) ?? false {
                 mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
             }
