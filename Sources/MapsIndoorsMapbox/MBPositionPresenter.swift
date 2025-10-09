@@ -76,11 +76,13 @@ class MBPositionPresenter: MPPositionPresenter {
 
         DispatchQueue.main.async { [self] in
             do {
-                var circleLayer = try map.layer(withId: LAYER_BLUEDOT_CIRCLE) as? CircleLayer
-                circleLayer?.visibility = .constant(.none)
+                try map.updateLayer(withId: LAYER_BLUEDOT_CIRCLE, type: CircleLayer.self) { circleLayer in
+                    circleLayer.visibility = .constant(.none)
+                }
 
-                var markerLayer = try map.layer(withId: LAYER_BLUEDOT_MARKER) as? SymbolLayer
-                markerLayer?.visibility = .constant(.none)
+                try map.updateLayer(withId: LAYER_BLUEDOT_MARKER, type: SymbolLayer.self) { markerLayer in
+                    markerLayer.visibility = .constant(.none)
+                }
             } catch {}
         }
     }
