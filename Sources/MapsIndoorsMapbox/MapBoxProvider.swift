@@ -73,19 +73,15 @@ public class MapBoxProvider: MPMapProvider {
     public var routeRenderer: MPRouteRenderer {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
+    
+    public func invalidateRenderCache() {
+        renderer?.invalidateRenderCache()
+    }
 
-    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
-
-//    private var lastSetViewModels = [any MPViewModel]()
+    @MainActor
     public func setViewModels(models: [any MPViewModel], forceClear _: Bool) async {
-//        d.async { [weak self] in
-//            guard let self else { return }
-//            self.lastSetViewModels.removeAll(keepingCapacity: true)
-//            self.lastSetViewModels.append(contentsOf: models)
-//        }
-
         if let r = renderer {
-            await configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
+            configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
         // Ignore `forceClear` - not applicable to mapbox rendering
