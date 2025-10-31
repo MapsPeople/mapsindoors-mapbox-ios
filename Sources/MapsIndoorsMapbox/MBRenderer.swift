@@ -22,7 +22,7 @@ class MBRenderer {
     private var _clippingSource: GeoJSONSource?
     private weak var mapView: MapView?
 
-    @MainActor private var _lastModels = Set<AnyHashable>()
+    private var _lastModels = Set<AnyHashable>()
     private var lock = UnfairLock()
 
     // Dictionary to store created info windows
@@ -40,7 +40,6 @@ class MBRenderer {
         onImageUnusedCancelable = map?.onStyleImageRemoveUnused.observe { [weak self] image in
             Task { @MainActor [weak self] in
                 try self?.map?.removeImage(withId: image.imageId)
-                self?.imagesAdded.remove(image.imageId)
             }
         }
 
@@ -469,12 +468,11 @@ class MBRenderer {
     var featureExtrusionOpacity: Double = 0 {
         didSet {
             if oldValue != featureExtrusionOpacity {
-                let newValue = featureExtrusionOpacity
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
                         try map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layer in
-                            layer.fillExtrusionOpacity = .constant(newValue)
+                            layer.fillExtrusionOpacity = .constant(self.featureExtrusionOpacity)
                         }
                     } catch {}
                 }
@@ -485,12 +483,11 @@ class MBRenderer {
     var wallExtrusionOpacity: Double = 0 {
         didSet {
             if oldValue != wallExtrusionOpacity {
-                let newValue = wallExtrusionOpacity
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
                         try map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layer in
-                            layer.fillExtrusionOpacity = .constant(newValue)
+                            layer.fillExtrusionOpacity = .constant(self.wallExtrusionOpacity)
                         }
                     } catch {}
                 }
@@ -571,53 +568,40 @@ class MBRenderer {
         provider?.onInfoWindowTapped(locationId: sender.modelId)
     }
 
-    @MainActor
-    private func removeOldModels(models: [any MPViewModel]) async {
+    private func removeOldModels(models: [any MPViewModel]) {
         let modelsNoLongerInView = _lastModels.subtracting(models as! [AnyHashable])
         for model in modelsNoLongerInView {
             if let viewModel = model as? (any MPViewModel) {
-                await removeInfoWindow(for: viewModel)
+                removeInfoWindow(for: viewModel)
             }
         }
         _lastModels.removeAll(keepingCapacity: false)
     }
 
-    
-    func invalidateRenderCache() {
-        imagesAdded.removeAll()
-        self.modelCache.removeAllValues()
-    }
+    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
 
     // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
-    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 10_000)
+//    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 5_000)
     func render(models: [any MPViewModel]) async throws {
         try Task.checkCancellation()
         let startTime = DispatchTime.now()
-        await self.removeOldModels(models: models)
+        d.async { self.removeOldModels(models: models) }
         try Task.checkCancellation()
-        let models = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+        let models = await withTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
             for model in models {
                 _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [weak self] in
                     guard let self else { return ([], [], [], [], [], []) }
 
-                    Task.detached { @MainActor in
-                        self._lastModels.insert(model)
-                    }
-                    
-                    await updateInfoWindow(for: model)
+                    d.async { _ = self._lastModels.insert(model) }
+                    updateInfoWindow(for: model)
 
-                    //let md5 = model.md5
-                    let cacheKey = "\(model.id)+z\(model.zoomLevel ?? 0)"
-                    if let cacheHit = modelCache[cacheKey] {
-                        return cacheHit
-                    }
+//                    let md5 = model.md5
+//                    if let cacheHit = modelCache[md5] {
+//                        return cacheHit
+//                    }
 
-                    Task.detached(priority: .userInitiated) {
-                        try Task.checkCancellation()
-                        try await self.updateImage(for: model)
-                        try Task.checkCancellation()
-                        try await self.update2DModel(for: model)
-                    }
+                    updateImage(for: model)
+                    update2DModel(for: model)
 
                     var features = [Feature]()
                     var featuresGeometry = [Feature]()
@@ -634,61 +618,47 @@ class MBRenderer {
                             features.append(marker)
                         }
                     }
-                    
-                    try Task.checkCancellation()
-                    
+
                     if let polygon = model.polygonFeature {
                         featuresGeometry.append(polygon)
                     }
-                    
-                    try Task.checkCancellation()
 
                     if isFloorPlanEnabled, let floorPlan = model.floorPlanFeature {
                         featuresGeometry.append(floorPlan)
                     }
-                    
-                    try Task.checkCancellation()
 
                     if is2dModelsEnabled, let model2D = model.model2DFeature,
                        let model2DGeometry = model.model2DGeometryFeature {
                         features.append(model2D)
                         featuresGeometry.append(model2DGeometry)
                     }
-                    
-                    try Task.checkCancellation()
 
                     if let model3D = model.model3DFeature {
                         features3DModels.append(model3D)
                     }
-                    
-                    try Task.checkCancellation()
 
                     if isWallExtrusionsEnabled, let wallExtrusionLayer = model.wallExtrusionFeature {
                         featuresWalls.append(wallExtrusionLayer)
                     }
-                    
-                    try Task.checkCancellation()
 
                     if isFeatureExtrusionsEnabled, let featureExtrusionLayer = model.featureExtrusionFeature {
                         featuresExtrusions.append(featureExtrusionLayer)
                     }
-                    
-                    try Task.checkCancellation()
 
                     let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
 
-                    modelCache[cacheKey] = result
+//                    modelCache[md5] = result
 
                     return result
                 }
             }
-            
-            try Task.checkCancellation()
 
-            let res = try await group.reduce(into: [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
+            let res = await group.reduce(into: [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
 
             return res
         }
+
+        try Task.checkCancellation()
 
         var features = [Feature]()
         var featuresGeometry = [Feature]()
@@ -696,7 +666,15 @@ class MBRenderer {
         var featuresExtrusions = [Feature]()
         var featuresWalls = [Feature]()
         var features3DModels = [Feature]()
-        
+        features.reserveCapacity(models.count)
+        featuresGeometry.reserveCapacity(models.count)
+        featuresNonCollision.reserveCapacity(models.count)
+        featuresExtrusions.reserveCapacity(models.count)
+        featuresWalls.reserveCapacity(models.count)
+        features3DModels.reserveCapacity(models.count)
+
+        try Task.checkCancellation()
+
         for x in models {
             features.append(contentsOf: x.0)
             featuresGeometry.append(contentsOf: x.1)
@@ -707,104 +685,94 @@ class MBRenderer {
         }
 
         let elapsedTimeInNanoSec = DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds
-        let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000
-        MPLog.mapbox.measure("ViewModels to Features", timeMs: elapsedTimeInMilliSec)
+        let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000_000
+        MPLog.mapbox.measure("ViewModel to Feature", timeMs: elapsedTimeInMilliSec)
 
-        try await updateGeoJSONSource(features: features,
-                                      geometryFeatures: featuresGeometry,
-                                      nonCollisionFeatures: featuresNonCollision,
-                                      featuresExtrusions: featuresExtrusions,
-                                      featuresWalls: featuresWalls,
-                                      features3DModels: features3DModels
-        )
+        try Task.checkCancellation()
+
+        try updateGeoJSONSource(features: features, geometryFeatures: featuresGeometry, nonCollisionFeatures: featuresNonCollision, featuresExtrusions: featuresExtrusions, featuresWalls: featuresWalls, features3DModels: features3DModels)
     }
 
-    @MainActor
-    private func removeInfoWindow(for model: any MPViewModel) async {
-        if let infoWindow = infoWindows[model.id] {
-            infoWindow.remove()
-            infoWindows.removeValue(forKey: model.id)
+    private func removeInfoWindow(for model: any MPViewModel) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let infoWindow = infoWindows[model.id] {
+                infoWindow.remove()
+                infoWindows.removeValue(forKey: model.id)
+            }
         }
     }
 
-    private func updateInfoWindow(for model: any MPViewModel) async {
+    private func updateInfoWindow(for model: any MPViewModel) {
         if model.showInfoWindow {
             if let point = model.marker?.geometry.coordinates as? MPPoint, let location = MPMapsIndoors.shared.locationWith(locationId: model.id) {
-                await createOrUpdateInfoWindow(for: model, at: point, location: location)
+                createOrUpdateInfoWindow(for: model, at: point, location: location)
             }
-        } else if infoWindows[model.id] != nil {
-            await removeInfoWindow(for: model)
+        } else {
+            removeInfoWindow(for: model)
         }
     }
 
-    @MainActor
-    private func createOrUpdateInfoWindow(for model: any MPViewModel, at point: MPPoint, location: MPLocation) async {
-        var yOffset = 0.0
-        var xOffset = 0.0
+    private func createOrUpdateInfoWindow(for model: any MPViewModel, at point: MPPoint, location: MPLocation) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var yOffset = 0.0
+            var xOffset = 0.0
 
-        let respectDistance = 5.0
+            let respectDistance = 5.0
 
-        // Based on icon placement and size, compute offsets for the info window
-        if let icon = model.data[.icon] as? UIImage {
-            if let iconPlacement = model.marker?.properties[.markerIconPlacement] as? String {
-                yOffset = (icon.size.height / 2) + respectDistance
+            // Based on icon placement and size, compute offsets for the info window
+            if let icon = model.data[.icon] as? UIImage {
+                if let iconPlacement = model.marker?.properties[.markerIconPlacement] as? String {
+                    yOffset = (icon.size.height / 2) + respectDistance
 
-                switch iconPlacement {
-                case "bottom":
-                    yOffset = icon.size.height + respectDistance
-                case "top":
-                    yOffset = respectDistance
-                case "left":
-                    xOffset = icon.size.width / 2
-                case "right":
-                    xOffset = -(icon.size.width / 2)
-                case "center":
-                    fallthrough
-                default:
-                    break
+                    switch iconPlacement {
+                    case "bottom":
+                        yOffset = icon.size.height + respectDistance
+                    case "top":
+                        yOffset = respectDistance
+                    case "left":
+                        xOffset = icon.size.width / 2
+                    case "right":
+                        xOffset = -(icon.size.width / 2)
+                    case "center":
+                        fallthrough
+                    default:
+                        break
+                    }
                 }
             }
-        }
-        
-        guard infoWindows[model.id] == nil else { return }
-        
-        if let infoWindowView = await customInfoWindow?.infoWindowFor(location: location) {
             
-            let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
+            guard infoWindows[model.id] == nil else { return }
             
-            // Ensure it is shown dispite anything else
-            view.allowZElevate = true
-            view.allowOverlap = true
-            view.ignoreCameraPadding = true
-            view.allowOverlapWithPuck = true
-            
-            // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
-            view.variableAnchors = [
-                ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: xOffset, offsetY: yOffset)
-            ]
-            
-            // Remember the view annotation
-            infoWindows[model.id] = view
-            
-            // Add the view annotation to the map
-            mapView?.viewAnnotations.add(view)
-            setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: model.id)
+            if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
+                
+                let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
+                
+                // Ensure it is shown dispite anything else
+                view.allowZElevate = true
+                view.allowOverlap = true
+                view.ignoreCameraPadding = true
+                view.allowOverlapWithPuck = true
+                
+                // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
+                view.variableAnchors = [
+                    ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: xOffset, offsetY: yOffset)
+                ]
+                
+                // Remember the view annotation
+                infoWindows[model.id] = view
+                
+                // Add the view annotation to the map
+                mapView?.viewAnnotations.add(view)
+                setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: model.id)
+            }
         }
     }
 
-    private var imagesAdded = Set<String>()
-    
-    @MainActor
-    private func updateImage(for model: any MPViewModel) async throws {
-        guard let id = model.marker?.id else { return }
-        
-        if let icon = model.data[.icon] as? UIImage, model.marker?.properties[.hasImage] as? Bool == true {
-            let newIconHash = icon.md5
-            guard imagesAdded.contains(newIconHash) == false else { return }
-            guard map?.image(withId: id)?.md5 != newIconHash else { return }
-            try map?.addImage(icon, id: id)
-        } else {
-            try? map?.removeImage(withId: id)
+    private func updateImage(for model: any MPViewModel) {
+        if let icon = model.data[.icon] as? UIImage, let id = model.marker?.id {
+            map?.safeAddImage(image: icon, id: id)
         }
 
         if let graphicImage = model.data[.graphicLabelImage] as? UIImage,
@@ -812,8 +780,7 @@ class MBRenderer {
            let x = model.marker?.properties[.labelGraphicStretchX] as? [[Int]],
            let y = model.marker?.properties[.labelGraphicStretchY] as? [[Int]],
            let content = model.marker?.properties[.labelGraphicContent] as? [Int], content.count == 4 {
-            
-            try map?.addImage(graphicImage,
+            map?.safeAddImage(image: graphicImage,
                               id: id,
                               stretchX: x.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
                               stretchY: y.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
@@ -821,12 +788,9 @@ class MBRenderer {
         }
     }
 
-    @MainActor
-    private func update2DModel(for model: any MPViewModel) async throws {
+    private func update2DModel(for model: any MPViewModel) {
         if let model2D = model.data[.model2D] as? UIImage, let id = model.model2D?.id, is2dModelsEnabled {
-            guard imagesAdded.contains(model2D.md5) == false else { return }
-            try map?.addImage(model2D, id: id)
-            imagesAdded.insert(model2D.md5)
+            map?.safeAddImage(image: model2D, id: id)
         }
     }
 
@@ -836,25 +800,42 @@ class MBRenderer {
         }
     }
 
-    @MainActor
-    private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) async throws {
+    private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) throws {
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
+        }
 
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
+        }
 
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
+        }
 
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
+        }
 
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
-        
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
+        }
+
         try Task.checkCancellation()
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
+        }
     }
 }
 
@@ -995,6 +976,39 @@ private extension UIImage {
     }
 }
 
+private extension MapboxMap {
+    /// Call this to add/update image
+    /// - Parameters:
+    ///   - image: image/icon to be passed
+    ///   - withId: Id with which to check/add to map style
+    func safeAddImage(image: UIImage, id: String, stretchX: [ImageStretches]? = nil, stretchY: [ImageStretches]? = nil, content: ImageContent? = nil) {
+        if Thread.isMainThread {
+            do {
+                if let stretchX, let stretchY, let content {
+                    try addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
+                } else {
+                    try addImage(image, id: id)
+                }
+            } catch {
+                MPLog.mapbox.error("Error adding/updating image: \(error.localizedDescription)")
+            }
+        } else {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    if let stretchX, let stretchY, let content {
+                        try addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
+                    } else {
+                        try addImage(image, id: id)
+                    }
+                } catch {
+                    MPLog.mapbox.error("Error adding/updating image: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+}
+
 private class UnfairLock {
     // https://swiftrocks.com/thread-safety-in-swift
 
@@ -1054,23 +1068,4 @@ private extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], 
             }
         }
     }
-}
-
-fileprivate extension UIImage {
-    
-    var md5: String {
-        guard let imageData = self.pngData() else { return "" }
-        return imageData.md5
-    }
-    
-}
-
-import CryptoKit
-fileprivate extension Data {
-    
-    var md5: String {
-        let hash = Insecure.MD5.hash(data: self)
-        return hash.map { String(format: "%02hhx", $0) }.joined()
-    }
-    
 }
