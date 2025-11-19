@@ -73,21 +73,18 @@ public class MapBoxProvider: MPMapProvider {
     public var routeRenderer: MPRouteRenderer {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
+    
+    public func invalidateRenderCache() {
+        renderer?.invalidateRenderCache()
+    }
 
-    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
-
-//    private var lastSetViewModels = [any MPViewModel]()
+    @MainActor
     public func setViewModels(models: [any MPViewModel], forceClear _: Bool) async {
-//        d.async { [weak self] in
-//            guard let self else { return }
-//            self.lastSetViewModels.removeAll(keepingCapacity: true)
-//            self.lastSetViewModels.append(contentsOf: models)
-//        }
-
         if let r = renderer {
-            await configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
+            configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
+        // TODO: These renderer setters are prone to BAD_ACCESS - investigate further protections
         // Ignore `forceClear` - not applicable to mapbox rendering
         renderer?.customInfoWindow = customInfoWindow
         renderer?.collisionHandling = collisionHandling
@@ -186,14 +183,6 @@ public class MapBoxProvider: MPMapProvider {
 
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
 
-//        var lastModels = [any MPViewModel]()
-//        lastModels.append(contentsOf: self.lastSetViewModels)
-//        d.sync { [weak self] in
-//            guard let self else { return }
-//            lastModels.append(contentsOf: self.lastSetViewModels)
-//        }
-
-//        await setViewModels(models: lastModels, forceClear: true)
         await setViewModels(models: [], forceClear: true)
     }
 
