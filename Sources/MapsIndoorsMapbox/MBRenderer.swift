@@ -768,7 +768,7 @@ class MBRenderer {
         
         guard infoWindows[model.id] == nil else { return }
         
-        if let infoWindowView = await customInfoWindow?.infoWindowFor(location: location) {
+        if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
             
             let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
             

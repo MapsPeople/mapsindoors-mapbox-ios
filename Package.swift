@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-let mapsindoorsVersion = Version("4.16.0-rc.4")
+let mapsindoorsVersion = Version("4.16.0-rc.5")
 
 let package = Package(
     name: "MapsIndoorsMapbox",

@@ -140,6 +140,7 @@ public class MapBoxProvider: MPMapProvider {
         await loadMapbox()
     }
 
+    private var latestIdleTime = Date.now
     @MainActor
     public func loadMapbox() async {
         if useMapsIndoorsStyle, MPNetworkReachabilityManager.shared().isReachable {
@@ -166,8 +167,11 @@ public class MapBoxProvider: MPMapProvider {
             }
         }
         cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { _ in
-            Task.detached(priority: .userInitiated) { [weak self] in
-                self?.delegate?.cameraIdle()
+            if self.latestIdleTime.timeIntervalSinceNow < -0.5 {
+                self.latestIdleTime = Date.now
+                Task.detached(priority: .userInitiated) { [weak self] in
+                    self?.delegate?.cameraIdle()
+                }
             }
         }
 
