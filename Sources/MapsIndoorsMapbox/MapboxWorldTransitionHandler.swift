@@ -5,6 +5,7 @@ import MapsIndoorsCore
 class MapboxWorldTransitionHandler {
     private let baseMap = "basemap"
     private let placeLabels = "showPlaceLabels"
+    private let transitLabels = "showTransitLabels"
     private let roadLabels = "showRoadLabels"
     private let poiLabels = "showPointOfInterestLabels"
     private let buildingOpacity = "buildingsOpacity"
@@ -30,9 +31,11 @@ class MapboxWorldTransitionHandler {
             if let showPlacesAndPois = map.showMapboxMapMarkers {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: showPlacesAndPois)
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: showPlacesAndPois)
+                try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: showPlacesAndPois)
             } else {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+                try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
             }
             if let showRoads = map.showMapboxRoadLabels {
                 try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: showRoads)
@@ -67,10 +70,12 @@ class MapboxWorldTransitionHandler {
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: false)
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: false)
+        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
 
         if let show = map.showMapboxMapMarkers, show == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
+            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
         }
         if let show = map.showMapboxRoadLabels, show == true {
@@ -91,6 +96,7 @@ class MapboxWorldTransitionHandler {
         if let show = map.showMapboxMapMarkers, show == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
         }
         if let show = map.showMapboxRoadLabels, show == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
