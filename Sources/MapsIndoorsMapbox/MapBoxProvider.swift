@@ -73,18 +73,21 @@ public class MapBoxProvider: MPMapProvider {
     public var routeRenderer: MPRouteRenderer {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
-    
-    public func invalidateRenderCache() {
-        renderer?.invalidateRenderCache()
-    }
 
-    @MainActor
+    let d = DispatchQueue(label: "mdf", qos: .userInteractive)
+
+//    private var lastSetViewModels = [any MPViewModel]()
     public func setViewModels(models: [any MPViewModel], forceClear _: Bool) async {
+//        d.async { [weak self] in
+//            guard let self else { return }
+//            self.lastSetViewModels.removeAll(keepingCapacity: true)
+//            self.lastSetViewModels.append(contentsOf: models)
+//        }
+
         if let r = renderer {
-            configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
+            await configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
-        // TODO: These renderer setters are prone to BAD_ACCESS - investigate further protections
         // Ignore `forceClear` - not applicable to mapbox rendering
         renderer?.customInfoWindow = customInfoWindow
         renderer?.collisionHandling = collisionHandling
@@ -140,7 +143,6 @@ public class MapBoxProvider: MPMapProvider {
         await loadMapbox()
     }
 
-    private var latestIdleTime = Date.now
     @MainActor
     public func loadMapbox() async {
         if useMapsIndoorsStyle, MPNetworkReachabilityManager.shared().isReachable {
@@ -167,11 +169,8 @@ public class MapBoxProvider: MPMapProvider {
             }
         }
         cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { _ in
-            if self.latestIdleTime.timeIntervalSinceNow < -0.5 {
-                self.latestIdleTime = Date.now
-                Task.detached(priority: .userInitiated) { [weak self] in
-                    self?.delegate?.cameraIdle()
-                }
+            Task.detached(priority: .userInitiated) { [weak self] in
+                self?.delegate?.cameraIdle()
             }
         }
 
@@ -187,6 +186,14 @@ public class MapBoxProvider: MPMapProvider {
 
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
 
+//        var lastModels = [any MPViewModel]()
+//        lastModels.append(contentsOf: self.lastSetViewModels)
+//        d.sync { [weak self] in
+//            guard let self else { return }
+//            lastModels.append(contentsOf: self.lastSetViewModels)
+//        }
+
+//        await setViewModels(models: lastModels, forceClear: true)
         await setViewModels(models: [], forceClear: true)
     }
 

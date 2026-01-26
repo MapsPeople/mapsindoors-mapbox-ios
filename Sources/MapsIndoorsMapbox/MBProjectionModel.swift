@@ -30,9 +30,9 @@ class MBProjectionModel: MPProjection {
             // Obviously this is costly, the larger the buffer becomes - so we gradually increase the buffer size based on the zoom level.
             let zoom = view.mapboxMap.cameraState.zoom
             let bufferFactor = switch zoom {
-                case 0..<18: 1.0 // Add no buffer to the viewport area
-                case 18..<21: 1.5 // Add a 50% buffer to the viewport area
-                case 21..<25: 2.0 // Add a 100% buffer to the viewport area
+                case 0..<16: 1.0 // Add no buffer to the viewport area
+                case 16..<20: 2.0 // Add a 100% buffer to the viewport area
+                case 20..<25: 3.0 // Add a 200% buffer to the viewport area
                 default: 1.0
             }
 
