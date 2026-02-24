@@ -1,4 +1,4 @@
-@_spi(Experimental) import MapboxMaps
+import MapboxMaps
 @_spi(Private) import MapsIndoorsCore
 
 extension MapboxMap {

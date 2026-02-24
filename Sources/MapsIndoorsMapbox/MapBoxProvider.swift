@@ -1,7 +1,7 @@
 import Foundation
 @_spi(Private) import MapsIndoors
-import MapsIndoorsCore
-@_spi(Experimental) import MapboxMaps
+@_spi(Private) import MapsIndoorsCore
+import MapboxMaps
 
 public class MapBoxProvider: MPMapProvider {
 
@@ -143,7 +143,7 @@ public class MapBoxProvider: MPMapProvider {
     private var latestIdleTime = Date.now
     @MainActor
     public func loadMapbox() async {
-        if useMapsIndoorsStyle, MPNetworkReachabilityManager.shared().isReachable {
+        if useMapsIndoorsStyle, NetworkPathMonitor.shared.isConnected {
             await withCheckedContinuation { [weak self] continuation in
                 guard let self else {
                     continuation.resume()
@@ -239,8 +239,8 @@ public class MapBoxProvider: MPMapProvider {
 
         let bottomPadding = padding.bottom + 5
         mapView.ornaments.options.scaleBar.visibility = .hidden
-        mapView.ornaments.options.logo.margins = CGPoint(x: 9, y: bottomPadding)
-        mapView.ornaments.options.attributionButton.position = .bottomLeading
+        mapView.ornaments.options.logo.margins = CGPoint(x: 8, y: bottomPadding)
+        mapView.ornaments.options.attributionButton.position = .bottomLeft
 
         let pos = mapView.ornaments.logoView.frame.width
         mapView.ornaments.options.attributionButton.margins = CGPoint(x: pos + 8, y: bottomPadding)

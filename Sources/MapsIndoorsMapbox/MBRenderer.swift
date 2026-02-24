@@ -1,6 +1,6 @@
 import Combine
 import Foundation
-@_spi(Experimental) import MapboxMaps
+import MapboxMaps
 @_spi(Private) @preconcurrency import MapsIndoorsCore
 import UIKit
 
@@ -1057,20 +1057,8 @@ private extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], 
 }
 
 fileprivate extension UIImage {
-    
     var md5: String {
         guard let imageData = self.pngData() else { return "" }
         return imageData.md5
     }
-    
-}
-
-import CryptoKit
-fileprivate extension Data {
-    
-    var md5: String {
-        let hash = Insecure.MD5.hash(data: self)
-        return hash.map { String(format: "%02hhx", $0) }.joined()
-    }
-    
 }

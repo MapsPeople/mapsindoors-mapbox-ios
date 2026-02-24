@@ -30,7 +30,7 @@ class MBTileProvider {
     }
 
     private func updateSource() throws {
-        if Reachability.isConnectedToNetwork() {
+        if NetworkPathMonitor.shared.isConnected {
             if templateUrl != _tileProvider.templateUrl() {
                 templateUrl = _tileProvider.templateUrl()
                 rasterSource.tiles = [templateUrl]
