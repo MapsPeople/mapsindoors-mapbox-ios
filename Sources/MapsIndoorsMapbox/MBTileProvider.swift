@@ -29,6 +29,31 @@ class MBTileProvider {
         }
     }
 
+    /// Ensures the tile layer exists as a `RasterLayer`. If the layer exists but has been replaced
+    /// with a different type (e.g. `ModelLayer`), it is removed and re-added as a `RasterLayer`
+    /// to prevent an `EXC_BAD_ACCESS` crash when Mapbox attempts to cast it to the wrong type.
+    private func ensureTileLayerIsRasterLayer() {
+        guard let map = mapView?.mapboxMap else { return }
+
+        let layerId = Constants.LayerIDs.tileLayer
+        guard map.layerExists(withId: layerId) else { return }
+
+        // Attempt a no-op update as RasterLayer to verify the layer type matches
+        do {
+            try map.updateLayer(withId: layerId, type: RasterLayer.self) { _ in }
+        } catch {
+            // The layer exists but is not a RasterLayer — remove and re-add it
+            MPLog.mapbox.error("Tile layer type mismatch detected, recreating as RasterLayer: \(error.localizedDescription)")
+            do {
+                try map.removeLayer(withId: layerId)
+                let rasterLayer = RasterLayer(id: layerId, source: Constants.SourceIDs.tileSource)
+                try map.addPersistentLayer(rasterLayer)
+            } catch {
+                MPLog.mapbox.error("Failed to recreate tile layer: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func updateSource() throws {
         if NetworkPathMonitor.shared.isConnected {
             if templateUrl != _tileProvider.templateUrl() {
@@ -51,6 +76,8 @@ class MBTileProvider {
             return
         }
 
+        ensureTileLayerIsRasterLayer()
+
         try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.tileLayer, type: RasterLayer.self) { updateLayer in
 
             if mapView?.mapboxMap.layerExists(withId: Constants.LayerIDs.polygonFillLayer) ?? false {
@@ -68,6 +95,8 @@ class MBTileProvider {
     }
 
     private func updateLayer() throws {
+        ensureTileLayerIsRasterLayer()
+
         try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.tileLayer, type: RasterLayer.self) { updateLayer in
             updateLayer.source = Constants.SourceIDs.tileSource
             updateLayer.rasterFadeDuration = .constant(0.5)

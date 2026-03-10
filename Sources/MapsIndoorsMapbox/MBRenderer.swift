@@ -1,7 +1,9 @@
 import Combine
+import CryptoKit
 import Foundation
+import LRUCache
 import MapboxMaps
-@_spi(Private) @preconcurrency import MapsIndoorsCore
+@_spi(Private) import MapsIndoorsCore
 import UIKit
 
 private class InfoWindowTapRecognizer: UITapGestureRecognizer {
@@ -96,7 +98,7 @@ class MBRenderer {
         _wallsGeoJsonSource?.data = nil
         _wallsGeoJsonSource?.tolerance = 0.2
         try map?.addSource(_wallsGeoJsonSource!)
-        
+
         _clippingSource = GeoJSONSource(id: Constants.SourceIDs.clippingSource)
         try map?.addSource(_clippingSource!)
     }
@@ -110,25 +112,27 @@ class MBRenderer {
                 Exp(.literal) { MPRenderedFeatureType.marker.rawValue }
             }
 
-            layerUpdate.iconImage = .expression(Exp(.switchCase) {
-                Exp(.eq) {
-                    Exp(.get) { Key.hasImage.rawValue }
-                    true
-                }
-                Exp(.get) { Key.markerId.rawValue }
-                ""
-            })
+            layerUpdate.iconImage = .expression(
+                Exp(.switchCase) {
+                    Exp(.eq) {
+                        Exp(.get) { Key.hasImage.rawValue }
+                        true
+                    }
+                    Exp(.get) { Key.markerId.rawValue }
+                    ""
+                })
             layerUpdate.iconAnchor = .expression(Exp(.get) { Key.markerIconPlacement.rawValue })
 
             // Only set the text if it's a floating label
-            layerUpdate.textField = .expression(Exp(.switchCase) {
-                Exp(.eq) {
-                    Exp(.get) { Key.labelType.rawValue }
-                    Exp(.literal) { MPLabelType.floating.rawValue }
-                }
-                Exp(.get) { Key.markerLabel.rawValue }
-                ""
-            })
+            layerUpdate.textField = .expression(
+                Exp(.switchCase) {
+                    Exp(.eq) {
+                        Exp(.get) { Key.labelType.rawValue }
+                        Exp(.literal) { MPLabelType.floating.rawValue }
+                    }
+                    Exp(.get) { Key.markerLabel.rawValue }
+                    ""
+                })
 
             layerUpdate.textAnchor = .expression(Exp(.get) { Key.labelAnchor.rawValue })
             layerUpdate.textJustify = .constant(TextJustify.left)
@@ -204,7 +208,7 @@ class MBRenderer {
                 25: Exp(.product) {
                     Exp(.literal) { 8 }
                     Exp(.get) { Key.labelSize.rawValue }
-                }
+                },
             ]
 
             layerUpdate.textSize = .expression(
@@ -224,14 +228,15 @@ class MBRenderer {
                 Exp(.literal) { MPLabelType.graphic.rawValue }
             }
 
-            layerUpdate.iconImage = .expression(Exp(.switchCase) {
-                Exp(.eq) {
-                    Exp(.get) { Key.hasImage.rawValue }
-                    true
-                }
-                Exp(.get) { Key.labelGraphicId.rawValue }
-                ""
-            })
+            layerUpdate.iconImage = .expression(
+                Exp(.switchCase) {
+                    Exp(.eq) {
+                        Exp(.get) { Key.hasImage.rawValue }
+                        true
+                    }
+                    Exp(.get) { Key.labelGraphicId.rawValue }
+                    ""
+                })
 
             layerUpdate.textField = .expression(Exp(.get) { Key.markerLabel.rawValue })
             layerUpdate.textAnchor = .constant(TextAnchor.center)
@@ -352,7 +357,7 @@ class MBRenderer {
                 25: Exp(.product) {
                     Exp(.literal) { 8 }
                     Exp(.get) { Key.model2DScale.rawValue }
-                }
+                },
             ]
 
             layerUpdate.iconSize = .expression(
@@ -375,7 +380,7 @@ class MBRenderer {
             }
         }
     }
-    
+
     private func configure2DModelElevatedLayer() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.model2DElevatedLayer, type: SymbolLayer.self) { layerUpdate in
             layerUpdate.iconAllowOverlap = .constant(true)
@@ -387,7 +392,7 @@ class MBRenderer {
             layerUpdate.slot = .middle
 
             layerUpdate.symbolZElevate = .constant(true)
-            
+
             let stops: [Double: Exp] = [
                 1: Exp(.product) {
                     Exp(.literal) { MBRenderer.zoom22Scale }
@@ -408,7 +413,7 @@ class MBRenderer {
                 25: Exp(.product) {
                     Exp(.literal) { 8 }
                     Exp(.get) { Key.model2DScale.rawValue }
-                }
+                },
             ]
 
             layerUpdate.iconSize = .expression(
@@ -425,7 +430,7 @@ class MBRenderer {
                     Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
                 }
                 Exp(.eq) {
-                    Exp(.get) { Key.model2DIsElevated.rawValue}
+                    Exp(.get) { Key.model2DIsElevated.rawValue }
                     true
                 }
             }
@@ -582,10 +587,9 @@ class MBRenderer {
         _lastModels.removeAll(keepingCapacity: false)
     }
 
-    
     func invalidateRenderCache() {
         imagesAdded.removeAll()
-        self.modelCache.removeAllValues()
+        self.modelCache.removeAll()
     }
 
     // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
@@ -603,7 +607,7 @@ class MBRenderer {
                     Task.detached { @MainActor in
                         self._lastModels.insert(model)
                     }
-                    
+
                     await updateInfoWindow(for: model)
 
                     //let md5 = model.md5
@@ -634,45 +638,46 @@ class MBRenderer {
                             features.append(marker)
                         }
                     }
-                    
+
                     try Task.checkCancellation()
-                    
+
                     if let polygon = model.polygonFeature {
                         featuresGeometry.append(polygon)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     if isFloorPlanEnabled, let floorPlan = model.floorPlanFeature {
                         featuresGeometry.append(floorPlan)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     if is2dModelsEnabled, let model2D = model.model2DFeature,
-                       let model2DGeometry = model.model2DGeometryFeature {
+                        let model2DGeometry = model.model2DGeometryFeature
+                    {
                         features.append(model2D)
                         featuresGeometry.append(model2DGeometry)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     if let model3D = model.model3DFeature {
                         features3DModels.append(model3D)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     if isWallExtrusionsEnabled, let wallExtrusionLayer = model.wallExtrusionFeature {
                         featuresWalls.append(wallExtrusionLayer)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     if isFeatureExtrusionsEnabled, let featureExtrusionLayer = model.featureExtrusionFeature {
                         featuresExtrusions.append(featureExtrusionLayer)
                     }
-                    
+
                     try Task.checkCancellation()
 
                     let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
@@ -682,7 +687,7 @@ class MBRenderer {
                     return result
                 }
             }
-            
+
             try Task.checkCancellation()
 
             let res = try await group.reduce(into: [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
@@ -696,7 +701,7 @@ class MBRenderer {
         var featuresExtrusions = [Feature]()
         var featuresWalls = [Feature]()
         var features3DModels = [Feature]()
-        
+
         for x in models {
             features.append(contentsOf: x.0)
             featuresGeometry.append(contentsOf: x.1)
@@ -710,12 +715,13 @@ class MBRenderer {
         let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000
         MPLog.mapbox.measure("ViewModels to Features", timeMs: elapsedTimeInMilliSec)
 
-        try await updateGeoJSONSource(features: features,
-                                      geometryFeatures: featuresGeometry,
-                                      nonCollisionFeatures: featuresNonCollision,
-                                      featuresExtrusions: featuresExtrusions,
-                                      featuresWalls: featuresWalls,
-                                      features3DModels: features3DModels
+        try await updateGeoJSONSource(
+            features: features,
+            geometryFeatures: featuresGeometry,
+            nonCollisionFeatures: featuresNonCollision,
+            featuresExtrusions: featuresExtrusions,
+            featuresWalls: featuresWalls,
+            features3DModels: features3DModels
         )
     }
 
@@ -765,27 +771,26 @@ class MBRenderer {
                 }
             }
         }
-        
+
         guard infoWindows[model.id] == nil else { return }
-        
+
         if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
-            
             let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
-            
+
             // Ensure it is shown dispite anything else
             view.allowZElevate = true
             view.allowOverlap = true
             view.ignoreCameraPadding = true
             view.allowOverlapWithPuck = true
-            
+
             // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
             view.variableAnchors = [
                 ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: xOffset, offsetY: yOffset)
             ]
-            
+
             // Remember the view annotation
             infoWindows[model.id] = view
-            
+
             // Add the view annotation to the map
             mapView?.viewAnnotations.add(view)
             setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: model.id)
@@ -793,11 +798,11 @@ class MBRenderer {
     }
 
     private var imagesAdded = Set<String>()
-    
+
     @MainActor
     private func updateImage(for model: any MPViewModel) async throws {
         guard let id = model.marker?.id else { return }
-        
+
         if let icon = model.data[.icon] as? UIImage, model.marker?.properties[.hasImage] as? Bool == true {
             let newIconHash = icon.md5
             guard imagesAdded.contains(newIconHash) == false else { return }
@@ -808,16 +813,17 @@ class MBRenderer {
         }
 
         if let graphicImage = model.data[.graphicLabelImage] as? UIImage,
-           let id = model.marker?.properties[.labelGraphicId] as? String,
-           let x = model.marker?.properties[.labelGraphicStretchX] as? [[Int]],
-           let y = model.marker?.properties[.labelGraphicStretchY] as? [[Int]],
-           let content = model.marker?.properties[.labelGraphicContent] as? [Int], content.count == 4 {
-            
-            try map?.addImage(graphicImage,
-                              id: id,
-                              stretchX: x.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
-                              stretchY: y.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
-                              content: ImageContent(left: Float(content[0]), top: Float(content[1]), right: Float(content[2]), bottom: Float(content[3])))
+            let id = model.marker?.properties[.labelGraphicId] as? String,
+            let x = model.marker?.properties[.labelGraphicStretchX] as? [[Int]],
+            let y = model.marker?.properties[.labelGraphicStretchY] as? [[Int]],
+            let content = model.marker?.properties[.labelGraphicContent] as? [Int], content.count == 4
+        {
+            try map?.addImage(
+                graphicImage,
+                id: id,
+                stretchX: x.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
+                stretchY: y.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
+                content: ImageContent(left: Float(content[0]), top: Float(content[1]), right: Float(content[2]), bottom: Float(content[3])))
         }
     }
 
@@ -852,7 +858,7 @@ class MBRenderer {
 
         try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
-        
+
         try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
     }
@@ -860,11 +866,9 @@ class MBRenderer {
 
 // MARK: Extensions
 
-/**
- We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
- */
-private extension MPViewModel {
-    var md5: String {
+/// We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
+extension MPViewModel {
+    fileprivate var md5: String {
         let id = id
         let markerHash = marker?.asString ?? ""
         let polygonHash = polygon?.asString ?? ""
@@ -876,35 +880,36 @@ private extension MPViewModel {
         return (id + markerHash + polygonHash + floorPlanHash + model2DHash + model3DHash + wallHash + featureHash).md5
     }
 
-    var markerFeature: Feature? {
+    fileprivate var markerFeature: Feature? {
         guard let marker else { return nil }
         let string = marker.toGeoJson()
         return parse(geojson: string)
     }
 
-    var polygonFeature: Feature? {
+    fileprivate var polygonFeature: Feature? {
         guard let polygon else { return nil }
         let string = polygon.toGeoJson()
         return parse(geojson: string)
     }
 
-    var floorPlanFeature: Feature? {
+    fileprivate var floorPlanFeature: Feature? {
         guard let floorPlan = floorPlanExtrusion else { return nil }
         let string = floorPlan.toGeoJson()
         return parse(geojson: string)
     }
 
-    var model2DFeature: Feature? {
+    fileprivate var model2DFeature: Feature? {
         guard let model2D else { return nil }
         let string = model2D.toGeoJson()
         return parse(geojson: string)
     }
 
-    var model2DGeometryFeature: Feature? {
+    fileprivate var model2DGeometryFeature: Feature? {
         guard let center = ((model2D?.geometry as? MPViewModelFeatureGeometry)?.coordinates as? MPPoint)?.coordinate,
-              let bearing = model2D?.properties[.model2dBearing] as? Double,
-              let width = model2D?.properties[.model2DWidth] as? Double,
-              let height = model2D?.properties[.model2DHeight] as? Double else { return nil }
+            let bearing = model2D?.properties[.model2dBearing] as? Double,
+            let width = model2D?.properties[.model2DWidth] as? Double,
+            let height = model2D?.properties[.model2DHeight] as? Double
+        else { return nil }
 
         let centerToCornerDist = hypot(width, height) / 2
 
@@ -935,19 +940,19 @@ private extension MPViewModel {
         return feature
     }
 
-    var model3DFeature: Feature? {
+    fileprivate var model3DFeature: Feature? {
         guard let model3D else { return nil }
         let string = model3D.toGeoJson()
         return parse(geojson: string)
     }
 
-    var wallExtrusionFeature: Feature? {
+    fileprivate var wallExtrusionFeature: Feature? {
         guard let wallExtrusion else { return nil }
         let string = wallExtrusion.toGeoJson()
         return parse(geojson: string)
     }
 
-    var featureExtrusionFeature: Feature? {
+    fileprivate var featureExtrusionFeature: Feature? {
         guard let featureExtrusion else { return nil }
         let string = featureExtrusion.toGeoJson()
         return parse(geojson: string)
@@ -963,8 +968,8 @@ private extension MPViewModel {
     }
 }
 
-private extension CLLocationCoordinate2D {
-    func computeOffset(distanceMeters: Double, heading: Double) -> CLLocationCoordinate2D {
+extension CLLocationCoordinate2D {
+    fileprivate func computeOffset(distanceMeters: Double, heading: Double) -> CLLocationCoordinate2D {
         let earthRadius = 6378137.0
         let distance = distanceMeters / earthRadius
         let heading = heading.radians
@@ -980,8 +985,8 @@ private extension CLLocationCoordinate2D {
     }
 }
 
-private extension UIImage {
-    func scaled(size: CGSize) -> UIImage? {
+extension UIImage {
+    fileprivate func scaled(size: CGSize) -> UIImage? {
         guard size != .zero else { return nil }
 
         let rendererFormat = UIGraphicsImageRendererFormat.preferred()
@@ -1033,20 +1038,15 @@ private class UnfairLock {
     case right
 }
 
-private extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])> {
-    subscript(key: String) -> ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])? {
+extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])> {
+    fileprivate subscript(key: String) -> ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])? {
         get {
             value(forKey: key)
         }
         set {
             if let array = newValue {
                 let stride = MemoryLayout<Feature>.stride
-                let usedBytes = array.0.count * stride +
-                    array.1.count * stride +
-                    array.2.count * stride +
-                    array.3.count * stride +
-                    array.4.count * stride +
-                    array.5.count * stride
+                let usedBytes = array.0.count * stride + array.1.count * stride + array.2.count * stride + array.3.count * stride + array.4.count * stride + array.5.count * stride
 
                 setValue(array, forKey: key, cost: usedBytes)
             } else {
@@ -1060,5 +1060,12 @@ fileprivate extension UIImage {
     var md5: String {
         guard let imageData = self.pngData() else { return "" }
         return imageData.md5
+    }
+}
+
+extension Data {
+    fileprivate var md5: String {
+        let hash = Insecure.MD5.hash(data: self)
+        return hash.map { String(format: "%02hhx", $0) }.joined()
     }
 }
