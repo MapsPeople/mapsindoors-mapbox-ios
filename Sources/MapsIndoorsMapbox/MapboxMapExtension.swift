@@ -7,10 +7,6 @@ import MapsIndoorsCore
     /// - Parameter mpLayer: `MPLayer` type as abstracted for Mapbox `Layer`used to render MapsIndoors content internally. Use the dot`.` notation
     /// - Returns: `String`. Id of layer
     func getMapsIndoorsMapboxLayerId(for mpLayer: MPLayer) -> String {
-        extractedFunc(mpLayer)
-    }
-
-    private func extractedFunc(_ mpLayer: MPLayer) -> String {
         switch mpLayer {
         case .TILE_LAYER:
             Constants.LayerIDs.tileLayer

@@ -1,5 +1,4 @@
 import Combine
-import CryptoKit
 import Foundation
 import MapboxMaps
 @_spi(Private) import MapsIndoorsCore
@@ -41,7 +40,7 @@ class MBRenderer {
         onImageUnusedCancelable = map?.onStyleImageRemoveUnused.observe { [weak self] image in
             Task { @MainActor [weak self] in
                 try self?.map?.removeImage(withId: image.imageId)
-                self?.imagesAdded.remove(image.imageId)
+                self?.imagesAdded.removeValue(forKey: image.imageId)
             }
         }
 
@@ -443,6 +442,11 @@ class MBRenderer {
             layerUpdate.modelRotation = .expression(Exp(.get) { Key.model3DRotation.rawValue })
             layerUpdate.modelType = .constant(.common3d)
             layerUpdate.slot = .middle
+
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.model3d.rawValue }
+            }
         }
     }
 
@@ -451,6 +455,11 @@ class MBRenderer {
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.wallExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.wallExtrusionHeight.rawValue })
             layerUpdate.slot = .middle
+
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.wallExtrusion.rawValue }
+            }
         }
     }
 
@@ -459,6 +468,11 @@ class MBRenderer {
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.featureExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.featureExtrusionHeight.rawValue })
             layerUpdate.slot = .middle
+
+            layerUpdate.filter = Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.featureExtrusion.rawValue }
+            }
         }
     }
 
@@ -598,20 +612,16 @@ class MBRenderer {
         let startTime = DispatchTime.now()
         await self.removeOldModels(models: models)
         try Task.checkCancellation()
-        let models = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+        let generatedModels = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
             for model in models {
                 _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [weak self] in
                     guard let self else { return ([], [], [], [], [], []) }
-
-                    Task.detached { @MainActor in
-                        self._lastModels.insert(model)
-                    }
 
                     await updateInfoWindow(for: model)
 
                     //let md5 = model.md5
                     let cacheKey = "\(model.id)+z\(model.zoomLevel ?? 0)"
-                    if let cacheHit = modelCache[cacheKey] {
+                    if let cacheHit = lock.locked({ self.modelCache[cacheKey] }) {
                         return cacheHit
                     }
 
@@ -681,7 +691,7 @@ class MBRenderer {
 
                     let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
 
-                    modelCache[cacheKey] = result
+                    lock.locked { self.modelCache[cacheKey] = result }
 
                     return result
                 }
@@ -694,6 +704,10 @@ class MBRenderer {
             return res
         }
 
+        await MainActor.run {
+            _lastModels = Set(models.map { AnyHashable($0) })
+        }
+
         var features = [Feature]()
         var featuresGeometry = [Feature]()
         var featuresNonCollision = [Feature]()
@@ -701,7 +715,7 @@ class MBRenderer {
         var featuresWalls = [Feature]()
         var features3DModels = [Feature]()
 
-        for x in models {
+        for x in generatedModels {
             features.append(contentsOf: x.0)
             featuresGeometry.append(contentsOf: x.1)
             featuresNonCollision.append(contentsOf: x.2)
@@ -796,19 +810,22 @@ class MBRenderer {
         }
     }
 
-    private var imagesAdded = Set<String>()
+    /// Maps Mapbox style image IDs to the ObjectIdentifier of the UIImage that was last added,
+    /// enabling O(1) change detection without expensive PNG encoding or MD5 hashing.
+    private var imagesAdded = [String: ObjectIdentifier]()
 
     @MainActor
     private func updateImage(for model: any MPViewModel) async throws {
         guard let id = model.marker?.id else { return }
 
         if let icon = model.data[.icon] as? UIImage, model.marker?.properties[.hasImage] as? Bool == true {
-            let newIconHash = icon.md5
-            guard imagesAdded.contains(newIconHash) == false else { return }
-            guard map?.image(withId: id)?.md5 != newIconHash else { return }
+            let imageIdentity = ObjectIdentifier(icon)
+            guard imagesAdded[id] != imageIdentity else { return }
             try map?.addImage(icon, id: id)
+            imagesAdded[id] = imageIdentity
         } else {
             try? map?.removeImage(withId: id)
+            imagesAdded.removeValue(forKey: id)
         }
 
         if let graphicImage = model.data[.graphicLabelImage] as? UIImage,
@@ -829,9 +846,10 @@ class MBRenderer {
     @MainActor
     private func update2DModel(for model: any MPViewModel) async throws {
         if let model2D = model.data[.model2D] as? UIImage, let id = model.model2D?.id, is2dModelsEnabled {
-            guard imagesAdded.contains(model2D.md5) == false else { return }
+            let imageIdentity = ObjectIdentifier(model2D)
+            guard imagesAdded[id] != imageIdentity else { return }
             try map?.addImage(model2D, id: id)
-            imagesAdded.insert(model2D.md5)
+            imagesAdded[id] = imageIdentity
         }
     }
 
@@ -867,40 +885,94 @@ class MBRenderer {
 
 /// We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
 extension MPViewModel {
-    fileprivate var md5: String {
-        let id = id
-        let markerHash = marker?.asString ?? ""
-        let polygonHash = polygon?.asString ?? ""
-        let floorPlanHash = floorPlanExtrusion?.asString ?? ""
-        let model2DHash = model2D?.asString ?? ""
-        let model3DHash = model3D?.asString ?? ""
-        let wallHash = wallExtrusion?.asString ?? ""
-        let featureHash = featureExtrusion?.asString ?? ""
-        return (id + markerHash + polygonHash + floorPlanHash + model2DHash + model3DHash + wallHash + featureHash).md5
-    }
-
     fileprivate var markerFeature: Feature? {
         guard let marker else { return nil }
-        let string = marker.toGeoJson()
-        return parse(geojson: string)
+        
+        var feature = Feature(geometry: marker.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let hasImage = marker.properties[.hasImage] as? Bool { feature.properties?[Key.hasImage.rawValue] = JSONValue(hasImage) }
+        if let markerId = marker.properties[.markerId] as? String { feature.properties?[Key.markerId.rawValue] = JSONValue(markerId) }
+        if let markerIconPlacement = marker.properties[.markerIconPlacement] as? String { feature.properties?[Key.markerIconPlacement.rawValue] = JSONValue(markerIconPlacement) }
+        if let labelType = (marker.properties[.labelType] as? MPLabelType)?.rawValue { feature.properties?[Key.labelType.rawValue] = JSONValue(labelType) }
+        if let markerLabel = marker.properties[.markerLabel] as? String { feature.properties?[Key.markerLabel.rawValue] = JSONValue(markerLabel) }
+        if let labelAnchor = marker.properties[.labelAnchor] as? String { feature.properties?[Key.labelAnchor.rawValue] = JSONValue(labelAnchor) }
+        if let labelOffset = marker.properties[.labelOffset] as? [Double] {
+            feature.properties?[Key.labelOffset.rawValue] = JSONValue(JSONArray(labelOffset.map { JSONValue($0) }))
+        }
+        if let markerGeometryArea = marker.properties[.markerGeometryArea] as? Double { feature.properties?[Key.markerGeometryArea.rawValue] = JSONValue(markerGeometryArea) }
+        if let labelMaxWidth = marker.properties[.labelMaxWidth] as? UInt { feature.properties?[Key.labelMaxWidth.rawValue] = JSONValue(Int(labelMaxWidth)) }
+        if let labelSize = marker.properties[.labelSize] as? Int { feature.properties?[Key.labelSize.rawValue] = JSONValue(labelSize) }
+        if let labelColor = marker.properties[.labelColor] as? String { feature.properties?[Key.labelColor.rawValue] = JSONValue(labelColor) }
+        if let labelOpacity = marker.properties[.labelOpacity] as? Double { feature.properties?[Key.labelOpacity.rawValue] = JSONValue(labelOpacity) }
+        if let labelHaloColor = marker.properties[.labelHaloColor] as? String { feature.properties?[Key.labelHaloColor.rawValue] = JSONValue(labelHaloColor) }
+        if let labelHaloWidth = marker.properties[.labelHaloWidth] as? Int { feature.properties?[Key.labelHaloWidth.rawValue] = JSONValue(labelHaloWidth) }
+        if let labelHaloBlur = marker.properties[.labelHaloBlur] as? Int { feature.properties?[Key.labelHaloBlur.rawValue] = JSONValue(labelHaloBlur) }
+        if let labelBearing = marker.properties[.labelBearing] as? Double { feature.properties?[Key.labelBearing.rawValue] = JSONValue(labelBearing) }
+        if let labelGraphicId = marker.properties[.labelGraphicId] as? String { feature.properties?[Key.labelGraphicId.rawValue] = JSONValue(labelGraphicId) }
+        if let labelGraphicStretchX = marker.properties[.labelGraphicStretchX] as? [[Int]] {
+            feature.properties?[Key.labelGraphicStretchX.rawValue] = JSONValue(JSONArray(labelGraphicStretchX.map { JSONValue(JSONArray($0.map { JSONValue(Int($0)) })) }))
+        }
+        if let labelGraphicStretchY = marker.properties[.labelGraphicStretchY] as? [[Int]] {
+            feature.properties?[Key.labelGraphicStretchY.rawValue] = JSONValue(JSONArray(labelGraphicStretchY.map { JSONValue(JSONArray($0.map { JSONValue($0) })) }))
+        }
+        if let labelGraphicContent = marker.properties[.labelGraphicContent] as? [Int] {
+            feature.properties?[Key.labelGraphicContent.rawValue] = JSONValue(JSONArray(labelGraphicContent.map { JSONValue($0) }))
+        }
+        if let markerType = (marker.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(markerType) }
+
+        return feature
     }
 
     fileprivate var polygonFeature: Feature? {
         guard let polygon else { return nil }
-        let string = polygon.toGeoJson()
-        return parse(geojson: string)
+
+        var feature = Feature(geometry: polygon.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let polygonFillcolor = polygon.properties[.polygonFillcolor] as? String { feature.properties?[Key.polygonFillcolor.rawValue] = JSONValue(polygonFillcolor) }
+        if let polygonFillOpacity = polygon.properties[.polygonFillOpacity] as? Double { feature.properties?[Key.polygonFillOpacity.rawValue] = JSONValue(polygonFillOpacity) }
+        if let polygonStrokeColor = polygon.properties[.polygonStrokeColor] as? String { feature.properties?[Key.polygonStrokeColor.rawValue] = JSONValue(polygonStrokeColor) }
+        if let polygonStrokeOpacity = polygon.properties[.polygonStrokeOpacity] as? Double { feature.properties?[Key.polygonStrokeOpacity.rawValue] = JSONValue(polygonStrokeOpacity) }
+        if let polygonStrokeWidth = polygon.properties[.polygonStrokeWidth] as? Double { feature.properties?[Key.polygonStrokeWidth.rawValue] = JSONValue(polygonStrokeWidth) }
+        if let polygonType = (polygon.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(polygonType) }
+
+        return feature
     }
 
     fileprivate var floorPlanFeature: Feature? {
         guard let floorPlan = floorPlanExtrusion else { return nil }
-        let string = floorPlan.toGeoJson()
-        return parse(geojson: string)
+
+        var feature = Feature(geometry: floorPlan.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let floorPlanFillColor = floorPlan.properties[.floorPlanFillColor] as? String { feature.properties?[Key.floorPlanFillColor.rawValue] = JSONValue(floorPlanFillColor) }
+        if let floorPlanFillOpacity = floorPlan.properties[.floorPlanFillOpacity] as? Double { feature.properties?[Key.floorPlanFillOpacity.rawValue] = JSONValue(floorPlanFillOpacity) }
+        if let floorPlanStrokeColor = floorPlan.properties[.floorPlanStrokeColor] as? String { feature.properties?[Key.floorPlanStrokeColor.rawValue] = JSONValue(floorPlanStrokeColor) }
+        if let floorPlanStrokeOpacity = floorPlan.properties[.floorPlanStrokeOpacity] as? Double { feature.properties?[Key.floorPlanStrokeOpacity.rawValue] = JSONValue(floorPlanStrokeOpacity) }
+        if let floorPlanStrokeWidth = floorPlan.properties[.floorPlanStrokeWidth] as? Double { feature.properties?[Key.floorPlanStrokeWidth.rawValue] = JSONValue(floorPlanStrokeWidth) }
+        if let floorPlanType = (floorPlan.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(floorPlanType) }
+
+        return feature
     }
 
     fileprivate var model2DFeature: Feature? {
         guard let model2D else { return nil }
-        let string = model2D.toGeoJson()
-        return parse(geojson: string)
+
+        var feature = Feature(geometry: nil)
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let model2dId = model2D.properties[.model2dId] as? String { feature.properties?[Key.model2dId.rawValue] = JSONValue(model2dId) }
+        if let model2dBearing = model2D.properties[.model2dBearing] as? Double { feature.properties?[Key.model2dBearing.rawValue] = JSONValue(model2dBearing) }
+        if let model2DScale = model2D.properties[.model2DScale] as? Double { feature.properties?[Key.model2DScale.rawValue] = JSONValue(model2DScale) }
+        if let model2DIsElevated = model2D.properties[.model2DIsElevated] as? Bool { feature.properties?[Key.model2DIsElevated.rawValue] = JSONValue(model2DIsElevated) }
+        if let model2DType = (model2D.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(model2DType) }
+
+        return feature
     }
 
     fileprivate var model2DGeometryFeature: Feature? {
@@ -934,36 +1006,56 @@ extension MPViewModel {
         feature.properties?[Key.polygonFillOpacity.rawValue] = 0.0
         feature.properties?[Key.polygonStrokeOpacity.rawValue] = 0.0
         feature.properties?[Key.polygonArea.rawValue] = JSONValue(width * height)
-        feature.properties?[Key.type.rawValue] = "model2d"
+        feature.properties?[Key.type.rawValue] = JSONValue(MPRenderedFeatureType.model2d.rawValue)
 
         return feature
     }
 
     fileprivate var model3DFeature: Feature? {
         guard let model3D else { return nil }
-        let string = model3D.toGeoJson()
-        return parse(geojson: string)
+
+        var feature = Feature(geometry: model3D.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let model3dId = model3D.properties[.model3dId] as? String { feature.properties?[Key.model3dId.rawValue] = JSONValue(model3dId) }
+        if let scale = model3D.properties[.model3DScale] as? [Double] {
+            feature.properties?[Key.model3DScale.rawValue] = JSONValue(JSONArray(scale.map { JSONValue($0) }))
+        }
+        if let rotation = model3D.properties[.model3DRotation] as? [Double] {
+            feature.properties?[Key.model3DRotation.rawValue] = JSONValue(JSONArray(rotation.map { JSONValue($0) }))
+        }
+        if let model3DType = (model3D.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(model3DType) }
+
+        return feature
     }
 
     fileprivate var wallExtrusionFeature: Feature? {
         guard let wallExtrusion else { return nil }
-        let string = wallExtrusion.toGeoJson()
-        return parse(geojson: string)
+
+        var feature = Feature(geometry: wallExtrusion.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let wallExtrusionColor = wallExtrusion.properties[.wallExtrusionColor] as? String { feature.properties?[Key.wallExtrusionColor.rawValue] = JSONValue(wallExtrusionColor) }
+        if let wallExtrusionHeight = wallExtrusion.properties[.wallExtrusionHeight] as? Double { feature.properties?[Key.wallExtrusionHeight.rawValue] = JSONValue(wallExtrusionHeight) }
+        if let wallExtrusionType = (wallExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(wallExtrusionType) }
+
+        return feature
     }
 
     fileprivate var featureExtrusionFeature: Feature? {
         guard let featureExtrusion else { return nil }
-        let string = featureExtrusion.toGeoJson()
-        return parse(geojson: string)
-    }
 
-    private func parse(geojson: String) -> Feature? {
-        do {
-            return try JSONDecoder().decode(Feature.self, from: geojson.data(using: .utf8)!)
-        } catch {
-            MPLog.mapbox.error("Error parsing data: \(error)")
-        }
-        return nil
+        var feature = Feature(geometry: featureExtrusion.geometry.featureGeometry())
+
+        feature.identifier = .string(id)
+        feature.properties = JSONObject()
+        if let featureExtrusionColor = featureExtrusion.properties[.featureExtrusionColor] as? String { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(featureExtrusionColor) }
+        if let featureExtrusionHeight = featureExtrusion.properties[.featureExtrusionHeight] as? Double { feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(featureExtrusionHeight) }
+        if let featureExtrusionType = (featureExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(featureExtrusionType) }
+
+        return feature
     }
 }
 
@@ -1055,16 +1147,80 @@ extension LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature
     }
 }
 
-fileprivate extension UIImage {
-    var md5: String {
-        guard let imageData = self.pngData() else { return "" }
-        return imageData.md5
+extension MPPolygonGeometry {
+    func toPolygon() -> Polygon {
+        let coordinates: [[CLLocationCoordinate2D]] = self.coordinates.map {
+            $0.map {
+                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            }
+        }
+        return Polygon(coordinates)
     }
 }
 
-extension Data {
-    fileprivate var md5: String {
-        let hash = Insecure.MD5.hash(data: self)
-        return hash.map { String(format: "%02hhx", $0) }.joined()
+extension [[MPPoint]] {
+    func toPolygon() -> Polygon {
+        let coordinates: [[CLLocationCoordinate2D]] = self.map {
+            $0.map {
+                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            }
+        }
+        return Polygon(coordinates)
+    }
+}
+
+extension MPMultiPolygonGeometry {
+    func toMultiPolygon() -> MultiPolygon {
+        let coordinates: [[[CLLocationCoordinate2D]]] = self.coordinates.map {
+            $0.coordinates.map {
+                $0.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                }
+            }
+        }
+        return MultiPolygon(coordinates)
+    }
+}
+
+extension [MPPolygonGeometry] {
+    func toMultiPolygon() -> MultiPolygon {
+        let polygons: [Polygon] = self.map {
+            $0.toPolygon()
+        }
+        return MultiPolygon(polygons)
+    }
+}
+
+extension [[[MPPoint]]] {
+    func toMultiPolygon() -> MultiPolygon {
+        let coordinates: [[[CLLocationCoordinate2D]]] = self.map {
+            $0.map {
+                $0.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                }
+            }
+        }
+        return MultiPolygon(coordinates)
+    }
+}
+
+extension MPViewModelFeatureGeometry {
+    func featureGeometry() -> GeometryConvertible? {
+        switch coordinates {
+        case is MPPoint:
+            Point((coordinates as! MPPoint).coordinate)
+        case is [[MPPoint]]:
+            (coordinates as! [[MPPoint]]).toPolygon()
+        case is MPPolygonGeometry:
+            (coordinates as! MPPolygonGeometry).toPolygon()
+        case is [[[MPPoint]]]:
+            (coordinates as! [[[MPPoint]]]).toMultiPolygon()
+        case is [MPPolygonGeometry]:
+            (coordinates as! [MPPolygonGeometry]).toMultiPolygon()
+        case is MPMultiPolygonGeometry:
+            (coordinates as! MPMultiPolygonGeometry).toMultiPolygon()
+        default:
+            nil
+        }
     }
 }
