@@ -619,8 +619,7 @@ class MBRenderer {
 
                     await updateInfoWindow(for: model)
 
-                    //let md5 = model.md5
-                    let cacheKey = "\(model.id)+z\(model.zoomLevel ?? 0)"
+                    let cacheKey = model.featureCacheKey
                     if let cacheHit = lock.locked({ self.modelCache[cacheKey] }) {
                         return cacheHit
                     }
@@ -728,7 +727,7 @@ class MBRenderer {
         let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000
         MPLog.mapbox.measure("ViewModels to Features", timeMs: elapsedTimeInMilliSec)
 
-        try await updateGeoJSONSource(
+        await updateGeoJSONSource(
             features: features,
             geometryFeatures: featuresGeometry,
             nonCollisionFeatures: featuresNonCollision,
@@ -860,23 +859,16 @@ class MBRenderer {
     }
 
     @MainActor
-    private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) async throws {
-        try Task.checkCancellation()
+    private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) async {
+        // All six GeoJSON sources must be updated atomically — no cancellation
+        // checks between them. A partial update (e.g. geometry updated but walls
+        // left stale) causes features like 3D walls to disappear during rapid
+        // camera movements when the RenderTaskQueue cancels in-flight tasks.
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
-
-        try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
-
-        try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
-
-        try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
-
-        try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
-
-        try Task.checkCancellation()
         map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
     }
 }
