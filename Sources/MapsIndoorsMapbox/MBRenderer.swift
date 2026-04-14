@@ -476,13 +476,21 @@ class MBRenderer {
         }
     }
 
-    var isFeatureExtrusionsEnabled = false
+    var isFeatureExtrusionsEnabled = false {
+        didSet { if oldValue != isFeatureExtrusionsEnabled { modelCache.removeAll() } }
+    }
 
-    var isWallExtrusionsEnabled = false
+    var isWallExtrusionsEnabled = false {
+        didSet { if oldValue != isWallExtrusionsEnabled { modelCache.removeAll() } }
+    }
 
-    var is2dModelsEnabled = false
+    var is2dModelsEnabled = false {
+        didSet { if oldValue != is2dModelsEnabled { modelCache.removeAll() } }
+    }
 
-    var isFloorPlanEnabled = false
+    var isFloorPlanEnabled = false {
+        didSet { if oldValue != isFloorPlanEnabled { modelCache.removeAll() } }
+    }
 
     var featureExtrusionOpacity: Double = 0 {
         didSet {
@@ -727,6 +735,10 @@ class MBRenderer {
         let elapsedTimeInMilliSec = Double(elapsedTimeInNanoSec) / 1_000_000
         MPLog.mapbox.measure("ViewModels to Features", timeMs: elapsedTimeInMilliSec)
 
+        // Allow cancellation before committing the atomic source update.
+        // Partial updates can cause 3D walls/models to disappear.
+        try Task.checkCancellation()
+
         await updateGeoJSONSource(
             features: features,
             geometryFeatures: featuresGeometry,
@@ -879,7 +891,7 @@ class MBRenderer {
 extension MPViewModel {
     fileprivate var markerFeature: Feature? {
         guard let marker else { return nil }
-        
+
         var feature = Feature(geometry: marker.geometry.featureGeometry())
 
         feature.identifier = .string(id)

@@ -9,31 +9,33 @@ class MBPositionPresenter: MPPositionPresenter {
         self.map = map
     }
 
-    private let SRC_BLUEDOT_CIRCLE = "SOURCE_MP_BLUEDOT_CIRCLE"
-    private let SRC_BLUEDOT_MARKER = "SOURCE_MP_BLUEDOT_MARKER"
-    private let LAYER_BLUEDOT_CIRCLE = "LAYER_MP_BLUEDOT_CIRCLE"
-    private let LAYER_BLUEDOT_MARKER = "LAYER_MP_BLUEDOT_MARKER"
+    private let srcBlueDotCircle = "SOURCE_MP_BLUEDOT_CIRCLE"
+    private let srcBlueDotMarker = "SOURCE_MP_BLUEDOT_MARKER"
+    private let layerBlueDotCircle = "LAYER_MP_BLUEDOT_CIRCLE"
+    private let layerBlueDotMarker = "LAYER_MP_BLUEDOT_MARKER"
 
-    private let BLUEDOT_ICON_ID = "MP_BLUEDOT_ICON"
-    private let BLUEDOT_CIRCLE_SIZE_ID = "MP_BLUEDOT_CIRLCE_SIZE"
+    private let blueDotIconId = "MP_BLUEDOT_ICON"
+    private let blueDotCircleSizeId = "MP_BLUEDOT_CIRLCE_SIZE"
 
-    func apply(position: CLLocationCoordinate2D,
-               markerIcon: UIImage,
-               markerBearing: Double,
-               markerOpacity: Double,
-               circleRadiusMeters: Double,
-               circleFillColor: UIColor,
-               circleStrokeColor: UIColor,
-               circleStrokeWidth: Double) {
+    func apply(
+        position: CLLocationCoordinate2D,
+        markerIcon: UIImage,
+        markerBearing: Double,
+        markerOpacity: Double,
+        circleRadiusMeters: Double,
+        circleFillColor: UIColor,
+        circleStrokeColor: UIColor,
+        circleStrokeWidth: Double
+    ) {
         guard let map else { return }
 
         DispatchQueue.main.async { [self] in
             addSourcesAndLayersIfNotPresent()
             do {
-                try map.moveLayer(withId: LAYER_BLUEDOT_CIRCLE, to: .above(Constants.LayerIDs.tileLayer))
-                try map.moveLayer(withId: LAYER_BLUEDOT_MARKER, to: .above(LAYER_BLUEDOT_CIRCLE))
+                try map.moveLayer(withId: layerBlueDotCircle, to: .above(Constants.LayerIDs.tileLayer))
+                try map.moveLayer(withId: layerBlueDotMarker, to: .above(layerBlueDotCircle))
 
-                try map.updateLayer(withId: LAYER_BLUEDOT_CIRCLE, type: CircleLayer.self) { circleLayer in
+                try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
                     circleLayer.visibility = .constant(.visible)
                     circleLayer.circleColor = .constant(StyleColor(circleFillColor))
                     circleLayer.circleOpacity = .constant(1 - circleFillColor.cgColor.alpha)
@@ -44,11 +46,11 @@ class MBPositionPresenter: MPPositionPresenter {
                     circleLayer.circleEmissiveStrength = .constant(1.0)
                 }
 
-                try map.updateLayer(withId: LAYER_BLUEDOT_MARKER, type: SymbolLayer.self) { markerLayer in
+                try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
                     markerLayer.visibility = .constant(.visible)
                     markerLayer.iconOpacity = .constant(markerOpacity)
                     markerLayer.iconRotate = .constant(markerBearing)
-                    markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { BLUEDOT_ICON_ID } })
+                    markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { blueDotIconId } })
                     markerLayer.iconRotationAlignment = .constant(.map)
                     markerLayer.iconPitchAlignment = .constant(.map)
                     markerLayer.iconAllowOverlap = .constant(true)
@@ -58,13 +60,12 @@ class MBPositionPresenter: MPPositionPresenter {
 
                 let circleSize = circleRadiusMeters / (cos(position.latitude * (.pi / 180)) * 0.019)
                 var bluedotFeature = Feature(geometry: .point(Point(position)))
-                bluedotFeature.properties = [BLUEDOT_CIRCLE_SIZE_ID: .number(circleSize)]
+                bluedotFeature.properties = [blueDotCircleSizeId: .number(circleSize)]
 
-                map.updateGeoJSONSource(withId: SRC_BLUEDOT_MARKER, geoJSON: GeoJSONObject.feature(bluedotFeature))
-                map.updateGeoJSONSource(withId: SRC_BLUEDOT_CIRCLE, geoJSON: GeoJSONObject.feature(bluedotFeature))
+                map.updateGeoJSONSource(withId: srcBlueDotMarker, geoJSON: GeoJSONObject.feature(bluedotFeature))
+                map.updateGeoJSONSource(withId: srcBlueDotCircle, geoJSON: GeoJSONObject.feature(bluedotFeature))
 
-                try map.addImage(markerIcon, id: BLUEDOT_ICON_ID, sdf: false)
-
+                try map.addImage(markerIcon, id: blueDotIconId, sdf: false)
             } catch {
                 MPLog.mapbox.error("Error attempting to update blue dot layers: " + error.localizedDescription)
             }
@@ -76,11 +77,11 @@ class MBPositionPresenter: MPPositionPresenter {
 
         DispatchQueue.main.async { [self] in
             do {
-                try map.updateLayer(withId: LAYER_BLUEDOT_CIRCLE, type: CircleLayer.self) { circleLayer in
+                try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
                     circleLayer.visibility = .constant(.none)
                 }
 
-                try map.updateLayer(withId: LAYER_BLUEDOT_MARKER, type: SymbolLayer.self) { markerLayer in
+                try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
                     markerLayer.visibility = .constant(.none)
                 }
             } catch {}
@@ -91,24 +92,24 @@ class MBPositionPresenter: MPPositionPresenter {
         guard let map else { return }
 
         do {
-            if map.sourceExists(withId: SRC_BLUEDOT_CIRCLE) == false {
-                var source = GeoJSONSource(id: SRC_BLUEDOT_CIRCLE)
+            if map.sourceExists(withId: srcBlueDotCircle) == false {
+                var source = GeoJSONSource(id: srcBlueDotCircle)
                 source.data = .featureCollection(FeatureCollection(features: []))
                 try map.addSource(source)
             }
 
-            if map.layerExists(withId: LAYER_BLUEDOT_CIRCLE) == false {
-                var circleLayer = CircleLayer(id: LAYER_BLUEDOT_CIRCLE, source: SRC_BLUEDOT_CIRCLE)
+            if map.layerExists(withId: layerBlueDotCircle) == false {
+                var circleLayer = CircleLayer(id: layerBlueDotCircle, source: srcBlueDotCircle)
                 circleLayer.circlePitchAlignment = .constant(.map)
                 circleLayer.circlePitchScale = .constant(.map)
 
                 let stops: [Double: Exp] = [
                     1: Exp(.product) {
                         MBRenderer.zoom22Scale
-                        Exp(.get) { Exp(.literal) { BLUEDOT_CIRCLE_SIZE_ID } }
+                        Exp(.get) { Exp(.literal) { blueDotCircleSizeId } }
                     },
 
-                    22: Exp(.get) { Exp(.literal) { BLUEDOT_CIRCLE_SIZE_ID } }
+                    22: Exp(.get) { Exp(.literal) { blueDotCircleSizeId } },
                 ]
 
                 circleLayer.circleRadius = .expression(
@@ -122,17 +123,16 @@ class MBPositionPresenter: MPPositionPresenter {
                 try map.addLayer(circleLayer, layerPosition: .above(Constants.LayerIDs.tileLayer))
             }
 
-            if map.sourceExists(withId: SRC_BLUEDOT_MARKER) == false {
-                var source = GeoJSONSource(id: SRC_BLUEDOT_MARKER)
+            if map.sourceExists(withId: srcBlueDotMarker) == false {
+                var source = GeoJSONSource(id: srcBlueDotMarker)
                 source.data = .featureCollection(FeatureCollection(features: []))
                 try map.addSource(source)
             }
 
-            if map.layerExists(withId: LAYER_BLUEDOT_MARKER) == false {
-                let markerLayer = SymbolLayer(id: LAYER_BLUEDOT_MARKER, source: SRC_BLUEDOT_MARKER)
-                try map.addLayer(markerLayer, layerPosition: .above(LAYER_BLUEDOT_CIRCLE))
+            if map.layerExists(withId: layerBlueDotMarker) == false {
+                let markerLayer = SymbolLayer(id: layerBlueDotMarker, source: srcBlueDotMarker)
+                try map.addLayer(markerLayer, layerPosition: .above(layerBlueDotCircle))
             }
-
         } catch {
             MPLog.mapbox.error("Error attempting to create blue dot sources and layers: " + error.localizedDescription)
         }

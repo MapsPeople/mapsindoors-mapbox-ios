@@ -1,7 +1,7 @@
 import Foundation
 import MapboxMaps
-import MapsIndoorsCore
 @_spi(Private) import MapsIndoors
+import MapsIndoorsCore
 
 extension BinaryFloatingPoint {
     var degrees: Self {
@@ -159,54 +159,55 @@ class MBRouteRenderer: MPRouteRenderer {
             }
 
             // https://github.com/brownsoo/ValueAnimator/tree/0.6.7
-            valueAnimator = ValueAnimator.animate("val", from: 0.0, to: 1.0, duration: duration,
-                                                  easing: EaseLinear.easeInOut(),
-                                                  onChanged: { _, v in
-                                                      DispatchQueue.global(qos: .userInteractive).async {
-                                                          var points = [CLLocationCoordinate2D]()
-                                                          var totalDistance = 0.0
-                                                          var prevPoint: CLLocationCoordinate2D?
-                                                          let routePoints = self.route
+            valueAnimator = ValueAnimator.animate(
+                "val", from: 0.0, to: 1.0, duration: duration,
+                easing: EaseLinear.easeInOut(),
+                onChanged: { _, v in
+                    DispatchQueue.global(qos: .userInteractive).async {
+                        var points = [CLLocationCoordinate2D]()
+                        var totalDistance = 0.0
+                        var prevPoint: CLLocationCoordinate2D?
+                        let routePoints = self.route
 
-                                                          for point in routePoints {
-                                                              if prevPoint != nil {
-                                                                  totalDistance += MPGeometryUtils.distance(from: MPGeoPoint(coordinate: prevPoint!), to: MPGeoPoint(coordinate: point))
-                                                              }
-                                                              prevPoint = point
-                                                          }
+                        for point in routePoints {
+                            if prevPoint != nil {
+                                totalDistance += MPGeometryUtils.distance(from: MPGeoPoint(coordinate: prevPoint!), to: MPGeoPoint(coordinate: point))
+                            }
+                            prevPoint = point
+                        }
 
-                                                          let stopDistance = v.value * totalDistance
-                                                          var distance = 0.0
+                        let stopDistance = v.value * totalDistance
+                        var distance = 0.0
 
-                                                          prevPoint = nil
-                                                          for i in stride(from: 0, through: routePoints.count - 1, by: 1) {
-                                                              let nextPoint = routePoints[i]
-                                                              if i == 0 || v.value == 1.0 {
-                                                                  points.append(nextPoint)
-                                                              } else {
-                                                                  let lastPoint = routePoints[i - 1]
-                                                                  var nextDistance = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: lastPoint), to: MPGeoPoint(coordinate: nextPoint))
-                                                                  if distance + nextDistance > stopDistance {
-                                                                      nextDistance = stopDistance - distance
-                                                                      let bearing = MPGeometryUtils.bearingBetweenPoints(from: lastPoint, to: nextPoint)
-                                                                      let computedPoint = self.computeOffset(from: lastPoint, dist: nextDistance, head: bearing)
-                                                                      points.append(computedPoint)
-                                                                      break
-                                                                  } else {
-                                                                      points.append(nextPoint)
-                                                                  }
-                                                                  distance += nextDistance
-                                                              }
-                                                          }
+                        prevPoint = nil
+                        for i in stride(from: 0, through: routePoints.count - 1, by: 1) {
+                            let nextPoint = routePoints[i]
+                            if i == 0 || v.value == 1.0 {
+                                points.append(nextPoint)
+                            } else {
+                                let lastPoint = routePoints[i - 1]
+                                var nextDistance = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: lastPoint), to: MPGeoPoint(coordinate: nextPoint))
+                                if distance + nextDistance > stopDistance {
+                                    nextDistance = stopDistance - distance
+                                    let bearing = MPGeometryUtils.bearingBetweenPoints(from: lastPoint, to: nextPoint)
+                                    let computedPoint = self.computeOffset(from: lastPoint, dist: nextDistance, head: bearing)
+                                    points.append(computedPoint)
+                                    break
+                                } else {
+                                    points.append(nextPoint)
+                                }
+                                distance += nextDistance
+                            }
+                        }
 
-                                                          DispatchQueue.main.async {
-                                                              let geom = LineString(points).geometry
-                                                              if self.mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) ?? false {
-                                                                  self.mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.animatedLineSource, geoJSON: GeoJSONObject.geometry(geom))
-                                                              }
-                                                          }
-                                                      }
-                                                  }, option: ValueAnimator.OptionBuilder().setRepeatInfinitely(repeating).build())
+                        DispatchQueue.main.async {
+                            let geom = LineString(points).geometry
+                            if self.mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) ?? false {
+                                self.mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.animatedLineSource, geoJSON: GeoJSONObject.geometry(geom))
+                            }
+                        }
+                    }
+                }, option: ValueAnimator.OptionBuilder().setRepeatInfinitely(repeating).build())
 
             valueAnimator?.resume()
         }

@@ -79,7 +79,6 @@ class MBTileProvider {
         ensureTileLayerIsRasterLayer()
 
         try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.tileLayer, type: RasterLayer.self) { updateLayer in
-
             if mapView?.mapboxMap.layerExists(withId: Constants.LayerIDs.polygonFillLayer) ?? false {
                 do {
                     try mapView?.mapboxMap.moveLayer(withId: Constants.LayerIDs.tileLayer, to: .below(Constants.LayerIDs.polygonFillLayer))
@@ -105,7 +104,7 @@ class MBTileProvider {
             if let transitionLevel = mapProvider?.transitionLevel {
                 let stops: [Double: Exp] = [
                     Double(transitionLevel): Exp(.literal) { 0.0 },
-                    Double(transitionLevel) + 1.0: Exp(.literal) { 1.0 }
+                    Double(transitionLevel) + 1.0: Exp(.literal) { 1.0 },
                 ]
 
                 updateLayer.rasterOpacity = .expression(

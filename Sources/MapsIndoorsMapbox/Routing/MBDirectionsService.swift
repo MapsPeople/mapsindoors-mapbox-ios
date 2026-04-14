@@ -9,16 +9,17 @@ class MBDirectionsService: MPExternalDirectionsService {
     }
 
     func query(origin: CLLocationCoordinate2D, destination: CLLocationCoordinate2D, config: MPDirectionsConfig) async throws -> MPRoute? {
-        let profile = switch config.travelMode {
-        case .walking:
-            "mapbox/walking"
-        case .bicycling:
-            "mapbox/cycling"
-        case .driving:
-            "mapbox/driving"
-        default:
-            ""
-        }
+        let profile =
+            switch config.travelMode {
+            case .walking:
+                "mapbox/walking"
+            case .bicycling:
+                "mapbox/cycling"
+            case .driving:
+                "mapbox/driving"
+            default:
+                ""
+            }
 
         let originString = "\(origin.longitude),\(origin.latitude)"
         let destinationString = "\(destination.longitude),\(destination.latitude)"
@@ -34,7 +35,7 @@ class MBDirectionsService: MPExternalDirectionsService {
             URLQueryItem(name: "geometries", value: "polyline"),
             URLQueryItem(name: "alternatives", value: "false"),
             URLQueryItem(name: "language", value: config.language ?? "en"),
-            URLQueryItem(name: "access_token", value: accessToken)
+            URLQueryItem(name: "access_token", value: accessToken),
         ]
 
         let dateFormatter = DateFormatter()
@@ -53,7 +54,7 @@ class MBDirectionsService: MPExternalDirectionsService {
 
         let (data, response) = try await URLSession.shared.data(from: url)
 
-        if let httpResponse = response as? HTTPURLResponse, (200 ... 299).contains(httpResponse.statusCode) == false {
+        if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) == false {
             MPLog.mapbox.error("Failed request to the Mapbox Directions API - code: \(httpResponse.statusCode)")
             throw MPError.directionsRouteNotFound
         }

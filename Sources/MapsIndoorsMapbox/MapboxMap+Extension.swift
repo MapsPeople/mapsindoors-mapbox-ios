@@ -27,7 +27,7 @@ extension MapboxMap {
 
         // 2D Models
         let model2DLayer = SymbolLayer(id: Constants.LayerIDs.model2DLayer, source: Constants.SourceIDs.geoJsonSource)
-        
+
         // 2D Models
         let model2DElevatedLayer = SymbolLayer(id: Constants.LayerIDs.model2DElevatedLayer, source: Constants.SourceIDs.geoJsonSource)
 
@@ -50,35 +50,36 @@ extension MapboxMap {
         let routeLineLayer = LineLayer(id: Constants.LayerIDs.lineLayer, source: Constants.SourceIDs.lineSource)
 
         let routeMarkerLayer = SymbolLayer(id: Constants.LayerIDs.routeMarkerLayer, source: Constants.SourceIDs.routeMarkerSource)
-        
+
         var clipLayer = ClipLayer(id: Constants.LayerIDs.clippingLayer, source: Constants.SourceIDs.clippingSource)
         clipLayer.slot = .top
         clipLayer.clipLayerTypes = .constant([.model])
         clipLayer.clipLayerScope = .constant(["basemap"])
-        
+
         // Sorted (first is bottom-most layer)
-        let layersInAscendingOrder = [
-            tileLayer,
-            polygonFillLayer,
-            polygonLineLayer,
-            floorPlanFillLayer,
-            floorPlanLineLayer,
-            model2DLayer,
-            flatLabelsLayer,
-            routeLineLayer,
-            routeAnimatedLayer,
-            model3DLayer,
-            wallExtrusionLayer,
-            featureExtrusionLayer,
-            model2DElevatedLayer,
-            markerLayer,
-            markerNonCollisionlayer,
-            graphicLabelsLayer,
-            circleLayer,
-            blueDotLayer,
-            routeMarkerLayer,
-            clipLayer
-        ] as [Layer]
+        let layersInAscendingOrder =
+            [
+                tileLayer,
+                polygonFillLayer,
+                polygonLineLayer,
+                floorPlanFillLayer,
+                floorPlanLineLayer,
+                model2DLayer,
+                flatLabelsLayer,
+                routeLineLayer,
+                routeAnimatedLayer,
+                model3DLayer,
+                wallExtrusionLayer,
+                featureExtrusionLayer,
+                model2DElevatedLayer,
+                markerLayer,
+                markerNonCollisionlayer,
+                graphicLabelsLayer,
+                circleLayer,
+                blueDotLayer,
+                routeMarkerLayer,
+                clipLayer,
+            ] as [Layer]
 
         for layer in layersInAscendingOrder {
             do {

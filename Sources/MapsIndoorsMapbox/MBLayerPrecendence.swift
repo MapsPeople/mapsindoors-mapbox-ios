@@ -3,11 +3,9 @@ import MapboxMaps
 import MapsIndoorsCore
 
 private typealias LayerId = Constants.LayerIDs
-/**
- * This class is responsible for rendering content in the desired order
- * The `LayerIDs` defined in the struct `Constants` contains the unique IDs by which the layers were rendered specifically on Mapbox
- * The static functions can be used from anywhere
- */
+/// This class is responsible for rendering content in the desired order
+/// The `LayerIDs` defined in the struct `Constants` contains the unique IDs by which the layers were rendered specifically on Mapbox
+/// The static functions can be used from anywhere
 class MBLayerPrecendence {
     private weak var map: MapboxMap?
 
@@ -42,13 +40,15 @@ class MBLayerPrecendence {
 
     /// Arranges the order of MP layers back to their default state
     static func reArrangeMPLayers(map: MapboxMap) {
-        let layerOrder = [LayerId.tileLayer: LayerPosition.below(LayerId.markerLayer),
-                          LayerId.markerLayer: LayerPosition.above(LayerId.tileLayer),
-                          LayerId.polygonFillLayer: LayerPosition.above(LayerId.markerLayer),
-                          LayerId.polygonLineLayer: LayerPosition.above(LayerId.polygonFillLayer),
-                          LayerId.model2DLayer: LayerPosition.above(LayerId.polygonLineLayer),
-                          LayerId.circleLayer: LayerPosition.above(LayerId.model2DLayer),
-                          LayerId.blueDotLayer: LayerPosition.above(LayerId.circleLayer)]
+        let layerOrder = [
+            LayerId.tileLayer: LayerPosition.below(LayerId.markerLayer),
+            LayerId.markerLayer: LayerPosition.above(LayerId.tileLayer),
+            LayerId.polygonFillLayer: LayerPosition.above(LayerId.markerLayer),
+            LayerId.polygonLineLayer: LayerPosition.above(LayerId.polygonFillLayer),
+            LayerId.model2DLayer: LayerPosition.above(LayerId.polygonLineLayer),
+            LayerId.circleLayer: LayerPosition.above(LayerId.model2DLayer),
+            LayerId.blueDotLayer: LayerPosition.above(LayerId.circleLayer),
+        ]
 
         for (layerId, position) in layerOrder {
             if map.layerExists(withId: layerId) {
@@ -63,20 +63,22 @@ class MBLayerPrecendence {
 
     /// May use this when moving layer position with respect to index
     static func arrangeMPLayers(map: MapboxMap) {
-        let layerOrder = [LayerId.tileLayer,
-                          LayerId.markerLayer,
-                          LayerId.polygonFillLayer,
-                          LayerId.polygonLineLayer,
-                          LayerId.model2DLayer,
-                          LayerId.circleLayer,
-                          LayerId.blueDotLayer]
+        let layerOrder = [
+            LayerId.tileLayer,
+            LayerId.markerLayer,
+            LayerId.polygonFillLayer,
+            LayerId.polygonLineLayer,
+            LayerId.model2DLayer,
+            LayerId.circleLayer,
+            LayerId.blueDotLayer,
+        ]
 
         for layer in map.styleImports {
             guard let index = layerOrder.firstIndex(of: layer.id) else {
                 continue
             }
 
-            for i in index + 1 ..< layerOrder.count {
+            for i in index + 1..<layerOrder.count {
                 let nextLayerId = layerOrder[i]
                 if map.layerExists(withId: nextLayerId) {
                     do {

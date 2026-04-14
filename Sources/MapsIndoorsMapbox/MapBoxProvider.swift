@@ -1,10 +1,9 @@
 import Foundation
+import MapboxMaps
 @_spi(Private) import MapsIndoors
 @_spi(Private) import MapsIndoorsCore
-import MapboxMaps
 
 public class MapBoxProvider: MPMapProvider {
-
     public let model2DResolutionLimit = 500
 
     public var enableNativeMapBuildings: Bool = true {
@@ -62,7 +61,7 @@ public class MapBoxProvider: MPMapProvider {
         didSet { adjustOrnaments() }
     }
 
-    public var MPaccessibilityElementsHidden: Bool = false
+    public var mpAccessibilityElementsHidden: Bool = false
 
     public weak var delegate: MPMapProviderDelegate?
 
@@ -73,7 +72,7 @@ public class MapBoxProvider: MPMapProvider {
     public var routeRenderer: MPRouteRenderer {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
-    
+
     public func invalidateRenderCache() {
         renderer?.invalidateRenderCache()
     }
@@ -134,6 +133,7 @@ public class MapBoxProvider: MPMapProvider {
 
     private var cameraChangedCancellable: AnyCancelable? = nil
     private var cameraIdleCancellable: AnyCancelable? = nil
+    private var _cameraDebounceTask: Task<Void, Never>?
 
     @MainActor
     private func verifySetup() async {
@@ -160,8 +160,16 @@ public class MapBoxProvider: MPMapProvider {
         _routeRenderer = MBRouteRenderer(mapView: mapView)
         mapView?.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(onMapClick)))
 
-        cameraChangedCancellable = mapView?.mapboxMap.onCameraChanged.observe { _ in
-            Task.detached(priority: .userInitiated) { [weak self] in
+        // Cancel any previous camera observers to prevent accumulation on reload
+        cameraChangedCancellable?.cancel()
+        cameraIdleCancellable?.cancel()
+
+        cameraChangedCancellable = mapView?.mapboxMap.onCameraChanged.observe { [weak self] _ in
+            guard let self else { return }
+            self._cameraDebounceTask?.cancel()
+            self._cameraDebounceTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms debounce
+                guard Task.isCancelled == false else { return }
                 self?.delegate?.cameraChangedPosition()
                 await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
             }
@@ -193,26 +201,27 @@ public class MapBoxProvider: MPMapProvider {
     @objc func onMapClick(_ sender: UITapGestureRecognizer) {
         let screenPoint = sender.location(in: mapView)
 
-        let queryOptions = RenderedQueryOptions(layerIds: [
-            Constants.LayerIDs.routeMarkerLayer,
-            Constants.LayerIDs.markerLayer,
-            Constants.LayerIDs.markerNoCollisionLayer,
-            Constants.LayerIDs.flatLabelsLayer,
-            Constants.LayerIDs.graphicLabelsLayer,
-            Constants.LayerIDs.model3DLayer,
-            Constants.LayerIDs.polygonFillLayer,
-            Constants.LayerIDs.wallExtrusionLayer,
-            Constants.LayerIDs.featureExtrusionLayer
-        ], filter: nil)
+        let queryOptions = RenderedQueryOptions(
+            layerIds: [
+                Constants.LayerIDs.routeMarkerLayer,
+                Constants.LayerIDs.markerLayer,
+                Constants.LayerIDs.markerNoCollisionLayer,
+                Constants.LayerIDs.flatLabelsLayer,
+                Constants.LayerIDs.graphicLabelsLayer,
+                Constants.LayerIDs.model3DLayer,
+                Constants.LayerIDs.polygonFillLayer,
+                Constants.LayerIDs.wallExtrusionLayer,
+                Constants.LayerIDs.featureExtrusionLayer,
+            ], filter: nil)
 
         mapView?.mapboxMap.queryRenderedFeatures(with: screenPoint, options: queryOptions) { result in
-            if case let .success(queriedFeatures) = result {
+            if case .success(let queriedFeatures) = result {
                 for result in queriedFeatures {
                     if result.queriedFeature.feature.properties?["clickable"] == JSONValue(booleanLiteral: false) {
                         continue
                     }
 
-                    guard let id = result.queriedFeature.feature.identifier, case let .string(idString) = id else { continue }
+                    guard let id = result.queriedFeature.feature.identifier, case .string(let idString) = id else { continue }
 
                     if idString == "end_marker" || idString == "start_marker" || idString.starts(with: "stop") {
                         self.routeRenderer.routeMarkerDelegate?.onRouteMarkerClicked(tag: idString)
@@ -282,27 +291,29 @@ public class MapBoxProvider: MPMapProvider {
     public func applyClippingGeometries(_ geometries: [MPPolygonGeometry]) async {
         let isClippingAllowed = MPMapsIndoors.shared.solution?.modules.contains("cliplayer") ?? false
         guard let mapView = mapView, isClippingAllowed == true else { return }
-            
+
         var features = [Feature]()
         for geometry in geometries {
             let coordinates = geometry.coordinates.map { $0.map(\.coordinate) }
             let feature = Feature(geometry: Polygon(coordinates))
             features.append(feature)
         }
-        
+
         let newGeoJSON: GeoJSONObject = .featureCollection(FeatureCollection(features: features)).geoJSONObject
-        
+
         await MainActor.run {
-            mapView.mapboxMap?.updateGeoJSONSource(withId: Constants.SourceIDs.clippingSource,
-                                                   geoJSON: newGeoJSON)
+            mapView.mapboxMap?.updateGeoJSONSource(
+                withId: Constants.SourceIDs.clippingSource,
+                geoJSON: newGeoJSON)
         }
     }
 }
 
-private extension QueriedFeature {
-    var mpRenderedFeatureType: MPRenderedFeatureType {
+extension QueriedFeature {
+    fileprivate var mpRenderedFeatureType: MPRenderedFeatureType {
         if let typeString = (feature.properties?["type"] as? JSONValue)?.rawValue as? String,
-           let type = MPRenderedFeatureType(rawValue: typeString) {
+            let type = MPRenderedFeatureType(rawValue: typeString)
+        {
             return type
         }
         return .undefined

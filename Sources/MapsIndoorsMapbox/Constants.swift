@@ -23,7 +23,7 @@ enum Constants {
         static let lineLayer = "ROUTE_POLYLINE_LAYER"
         static let animatedLineLayer = "ROUTE_ANIMATED_POLYLINE_LAYER"
         static let routeMarkerLayer = "ROUTE_MARKER_LAYER"
-        
+
         static let clippingLayer = "CLIPPING_LAYER"
     }
 
@@ -42,7 +42,7 @@ enum Constants {
         static let lineSource = "ROUTE_POLYLINE_SOURCE"
         static let animatedLineSource = "ROUTE_ANIMATED_POLYLINE_SOURCE"
         static let routeMarkerSource = "ROUTE_MARKER_SOURCE"
-        
+
         // Clipping source
         static let clippingSource = "CLIPPING_SOURCE"
     }

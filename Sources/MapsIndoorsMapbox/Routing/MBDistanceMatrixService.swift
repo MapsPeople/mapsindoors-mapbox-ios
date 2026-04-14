@@ -12,16 +12,17 @@ class MBDistanceMatrixService: MPExternalDistanceMatrixService {
     }
 
     func query(origins: [CLLocationCoordinate2D], destinations: [CLLocationCoordinate2D], config: MPDirectionsConfig) async throws -> MPDistanceMatrixResult? {
-        let profile = switch config.travelMode {
-        case .walking:
-            "mapbox/walking"
-        case .bicycling:
-            "mapbox/cycling"
-        case .driving:
-            "mapbox/driving"
-        default:
-            ""
-        }
+        let profile =
+            switch config.travelMode {
+            case .walking:
+                "mapbox/walking"
+            case .bicycling:
+                "mapbox/cycling"
+            case .driving:
+                "mapbox/driving"
+            default:
+                ""
+            }
 
         let coordinates = (origins + destinations).map { "\($0.longitude),\($0.latitude)" }.joined(separator: ";")
 
@@ -33,7 +34,7 @@ class MBDistanceMatrixService: MPExternalDistanceMatrixService {
             URLQueryItem(name: "sources", value: "all"),
             URLQueryItem(name: "destinations", value: "all"),
             URLQueryItem(name: "annotations", value: "distance,duration"),
-            URLQueryItem(name: "access_token", value: accessToken)
+            URLQueryItem(name: "access_token", value: accessToken),
         ]
 
         let dateFormatter = DateFormatter()
@@ -52,7 +53,7 @@ class MBDistanceMatrixService: MPExternalDistanceMatrixService {
 
         let (data, response) = try await URLSession.shared.data(from: url)
 
-        if let httpResponse = response as? HTTPURLResponse, (200 ... 299).contains(httpResponse.statusCode) == false {
+        if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) == false {
             MPLog.mapbox.error("Failed request to the Mapbox Distance Matrix API - code: \(httpResponse.statusCode)")
             throw MPError.directionsMatrixNotFound
         }
@@ -67,15 +68,19 @@ class MBDistanceMatrixService: MPExternalDistanceMatrixService {
         }
     }
 
-    func pruneDistanceMatrixDimensions(origins: [MPPoint],
-                                       destinations: [MPPoint]) -> ([MPPoint], [MPPoint]) {
+    func pruneDistanceMatrixDimensions(
+        origins: [MPPoint],
+        destinations: [MPPoint]
+    ) -> ([MPPoint], [MPPoint]) {
         var resultingOrigins = origins
         var resultingDestinations = destinations
 
         // Prune origins
-        let destinationsAvg = MPPoint(coordinate:
-            CLLocationCoordinate2D(latitude: (destinations.map(\.latitude).reduce(0.0, +)) / Double(destinations.count),
-                                   longitude: (destinations.map(\.longitude).reduce(0.0, +)) / Double(destinations.count)))
+        let destinationsAvg = MPPoint(
+            coordinate:
+                CLLocationCoordinate2D(
+                    latitude: (destinations.map(\.latitude).reduce(0.0, +)) / Double(destinations.count),
+                    longitude: (destinations.map(\.longitude).reduce(0.0, +)) / Double(destinations.count)))
 
         var originsDistanceTuple = [(MPPoint, Double)]()
         for origin in origins {
@@ -86,9 +91,11 @@ class MBDistanceMatrixService: MPExternalDistanceMatrixService {
         resultingOrigins = originsDistanceTuple.sorted { a, b in a.1 < b.1 }.map(\.0)
 
         // Prune destinations
-        let originsAvg = MPPoint(coordinate:
-            CLLocationCoordinate2D(latitude: (origins.map(\.latitude).reduce(0.0, +)) / Double(origins.count),
-                                   longitude: (origins.map(\.longitude).reduce(0.0, +)) / Double(origins.count)))
+        let originsAvg = MPPoint(
+            coordinate:
+                CLLocationCoordinate2D(
+                    latitude: (origins.map(\.latitude).reduce(0.0, +)) / Double(origins.count),
+                    longitude: (origins.map(\.longitude).reduce(0.0, +)) / Double(origins.count)))
 
         var distinationsDistanceTuple = [(MPPoint, Double)]()
         for destination in destinations {
@@ -137,11 +144,12 @@ extension MapboxDistanceMatrix {
         // Assuming distance and duration matrices are same dimensions, we can safely index on duration simultaneously
         mpMatrix.rows = [MPDistanceMatrixRows]()
         if let distanceMatrix = distances,
-           let durationMatrix = durations {
-            for i in 0 ..< originsCount {
+            let durationMatrix = durations
+        {
+            for i in 0..<originsCount {
                 var mpRow = MPDistanceMatrixRows()
                 mpRow.elements = [MPDistanceMatrixElements]()
-                for j in originsCount ..< (originsCount + destinations) {
+                for j in originsCount..<(originsCount + destinations) {
                     let distance = distanceMatrix[j][i]
                     let duration = durationMatrix[j][i]
 
