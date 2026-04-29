@@ -14,42 +14,13 @@ public class MapBoxProvider: MPMapProvider {
 
     public var useMapsIndoorsStyle: Bool = true
 
-    /// Internal (not `private`) so tests can inject a spy via `@testable import` to
-    /// assert that property didSet observers schedule a visibility re-apply.
-    internal var mapboxTransitionHandler: MapboxWorldTransitionHandler?
+    private var mapboxTransitionHandler: MapboxWorldTransitionHandler?
 
     public var transitionLevel = 17
 
-    /// Controls visibility of Mapbox base-map POI / place / transit labels.
-    /// `nil` (default) and `true` show them; `false` hides them.
-    public var showMapboxMapMarkers: Bool? {
-        didSet {
-            guard oldValue != showMapboxMapMarkers else { return }
-            Task { @MainActor [weak self] in
-                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
-            }
-        }
-    }
+    public var showMapboxMapMarkers: Bool?
 
-    public var showMapMarkers: Bool? = nil {
-        didSet {
-            guard oldValue != showMapMarkers else { return }
-            /// Mirror into `showMapboxMapMarkers`; its didSet schedules the style re-apply,
-            /// so we deliberately don't schedule one here (avoids double-invocation).
-            showMapboxMapMarkers = showMapMarkers
-        }
-    }
-
-    /// Controls visibility of Mapbox base-map road labels.
-    /// `nil` (default) and `true` show them; `false` hides them.
-    public var showMapboxRoadLabels: Bool? {
-        didSet {
-            guard oldValue != showMapboxRoadLabels else { return }
-            Task { @MainActor [weak self] in
-                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
-            }
-        }
-    }
+    public var showMapboxRoadLabels: Bool?
 
     public var wallExtrusionOpacity: Double = 0
 
@@ -67,7 +38,7 @@ public class MapBoxProvider: MPMapProvider {
 
     private var tileProvider: MBTileProvider?
 
-    private var onStyleLoadedCancelable: AnyCancelable?
+    private weak var onStyleLoadedCancelable: Cancelable?
 
     @MainActor
     public func setTileProvider(tileProvider: MPTileProvider) async {
@@ -79,6 +50,8 @@ public class MapBoxProvider: MPMapProvider {
     }
 
     private var renderer: MBRenderer?
+
+    private var layerSetup: MBLayerPrecendence?
 
     private var _routeRenderer: MBRouteRenderer?
 
@@ -116,7 +89,6 @@ public class MapBoxProvider: MPMapProvider {
         renderer?.collisionHandling = collisionHandling
         renderer?.featureExtrusionOpacity = featureExtrusionOpacity
         renderer?.wallExtrusionOpacity = wallExtrusionOpacity
-        renderer?.showMapMarkers = showMapMarkers
         do {
             try await renderer?.render(models: models)
         } catch {}
@@ -133,13 +105,11 @@ public class MapBoxProvider: MPMapProvider {
     private var accessToken: String
 
     private var performanceStatisticsCancelable: AnyCancelable?
-    private weak var tapGestureRecognizer: UITapGestureRecognizer?
 
     public required init(mapView: MapView, accessToken: String) {
         self.mapView = mapView
         view = mapView
         self.accessToken = accessToken
-        MPLogger.sharedInstance.setMapProviderLogIdentity(MBProviderLogIdentity())
         positionPresenter = MBPositionPresenter(map: self.mapView?.mapboxMap)
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
@@ -171,28 +141,8 @@ public class MapBoxProvider: MPMapProvider {
     }
 
     private var latestIdleTime = Date.now
-    private var loadTask: Task<Void, Never>?
-
-    /// Coalesces concurrent reload requests: a second caller awaits the
-    /// in-flight load instead of silently no-opping and resuming on a
-    /// half-configured map.
     @MainActor
     public func loadMapbox() async {
-        if let loadTask {
-            await loadTask.value
-            return
-        }
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self._loadMapbox()
-        }
-        loadTask = task
-        await task.value
-        loadTask = nil
-    }
-
-    @MainActor
-    private func _loadMapbox() async {
         if useMapsIndoorsStyle, NetworkPathMonitor.shared.isConnected {
             await withCheckedContinuation { [weak self] continuation in
                 guard let self else {
@@ -206,17 +156,9 @@ public class MapBoxProvider: MPMapProvider {
         }
 
         adjustOrnaments()
-        renderer?.cleanup()
         renderer = MBRenderer(mapView: mapView, provider: self)
         _routeRenderer = MBRouteRenderer(mapView: mapView)
-
-        // Remove any previously added tap recognizer to prevent duplicates on reload
-        if let existing = tapGestureRecognizer {
-            mapView?.removeGestureRecognizer(existing)
-        }
-        let tap = UITapGestureRecognizer(target: self, action: #selector(onMapClick))
-        tapGestureRecognizer = tap
-        mapView?.addGestureRecognizer(tap)
+        mapView?.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(onMapClick)))
 
         // Cancel any previous camera observers to prevent accumulation on reload
         cameraChangedCancellable?.cancel()
@@ -232,8 +174,7 @@ public class MapBoxProvider: MPMapProvider {
                 await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
             }
         }
-        cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { [weak self] _ in
-            guard let self else { return }
+        cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { _ in
             if self.latestIdleTime.timeIntervalSinceNow < -0.5 {
                 self.latestIdleTime = Date.now
                 Task.detached(priority: .userInitiated) { [weak self] in
@@ -260,13 +201,6 @@ public class MapBoxProvider: MPMapProvider {
     @objc func onMapClick(_ sender: UITapGestureRecognizer) {
         let screenPoint = sender.location(in: mapView)
 
-        // Use a small rect around the tap point to account for icon anchor offsets and to matches Apple's minimum touch target.
-        let tapTolerance: CGFloat = 22
-        let tapRect = CGRect(x: screenPoint.x - tapTolerance,
-                             y: screenPoint.y - tapTolerance,
-                             width: tapTolerance * 2,
-                             height: tapTolerance * 2)
-
         let queryOptions = RenderedQueryOptions(
             layerIds: [
                 Constants.LayerIDs.routeMarkerLayer,
@@ -280,7 +214,7 @@ public class MapBoxProvider: MPMapProvider {
                 Constants.LayerIDs.featureExtrusionLayer,
             ], filter: nil)
 
-        mapView?.mapboxMap.queryRenderedFeatures(with: tapRect, options: queryOptions) { result in
+        mapView?.mapboxMap.queryRenderedFeatures(with: screenPoint, options: queryOptions) { result in
             if case .success(let queriedFeatures) = result {
                 for result in queriedFeatures {
                     if result.queriedFeature.feature.properties?["clickable"] == JSONValue(booleanLiteral: false) {
@@ -340,22 +274,17 @@ public class MapBoxProvider: MPMapProvider {
     }
 
     private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString _: String) {
-        guard let bundle = MapsIndoorsBundle.bundle else {
-            MPLog.mapbox.debug("Failed to register font - bundle identifier invalid.")
-            return
-        }
-        guard let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil),
-              let fontData = NSData(contentsOfFile: pathForResourceString),
-              let dataProvider = CGDataProvider(data: fontData),
-              let fontRef = CGFont(dataProvider) else { return }
-
-        var errorRef: Unmanaged<CFError>? = nil
-        if CTFontManagerRegisterGraphicsFont(fontRef, &errorRef) == false {
-            /// Already-registered is expected on second and subsequent map instances since the font is registered process-wide; only surface other errors.
-            let code = errorRef.map { CFErrorGetCode($0.takeRetainedValue()) }
-            if code != CTFontManagerError.alreadyRegistered.rawValue {
-                MPLog.mapbox.debug("Failed to register font '\(filenameString)': code \(code ?? -1)")
+        if let bundle = MapsIndoorsBundle.bundle {
+            let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil)
+            if let fontData = NSData(contentsOfFile: pathForResourceString!), let dataProvider = CGDataProvider(data: fontData) {
+                let fontRef = CGFont(dataProvider)
+                var errorRef: Unmanaged<CFError>? = nil
+                if CTFontManagerRegisterGraphicsFont(fontRef!, &errorRef) == false {
+                    print("Failed to register font - register graphics font failed - this font may have already been registered in the main bundle.")
+                }
             }
+        } else {
+            print("Failed to register font - bundle identifier invalid.")
         }
     }
 

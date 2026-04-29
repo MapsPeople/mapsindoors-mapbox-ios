@@ -32,8 +32,6 @@ class MapboxWorldTransitionHandler {
     /// Tracks the last applied marker/road label config to avoid redundant calls
     private var lastAppliedMarkerConfig: (showMarkers: Bool?, showRoads: Bool?)?
 
-    /// Overridable so tests can subclass via `@testable import` and count invocations
-    /// scheduled by `MapBoxProvider` property didSet observers.
     @MainActor
     func configureMapsIndoorsVsMapboxVisiblity() async {
         guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
@@ -106,7 +104,7 @@ class MapboxWorldTransitionHandler {
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
 
-        if map.showMapboxMapMarkers != false {
+        if let show = map.showMapboxMapMarkers, show == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
@@ -126,7 +124,7 @@ class MapboxWorldTransitionHandler {
         guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
 
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: enableMapboxBuildings ? 1.0 : 0.0)
-        if map.showMapboxMapMarkers != false {
+        if let show = map.showMapboxMapMarkers, show == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)

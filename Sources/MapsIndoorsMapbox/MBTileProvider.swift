@@ -14,18 +14,6 @@ class MBTileProvider {
         self.mapProvider = mapProvider
         _tileProvider = tileProvider
         rasterSource = RasterSource(id: Constants.SourceIDs.tileSource)
-
-        /// Register the tile source BEFORE adding MapsIndoors layers so the tile layer's
-        /// source reference resolves immediately. Otherwise Mapbox logs
-        /// "Source 'TILE_SOURCE' missing for layer 'TILE_LAYER'" on the next frame,
-        /// until update() runs asynchronously and adds the source.
-        if self.mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.tileSource) == false {
-            do {
-                try self.mapView?.mapboxMap.addSource(rasterSource)
-            } catch {
-                MPLog.mapbox.error("Error adding initial tile source: \(error.localizedDescription)")
-            }
-        }
         self.mapView?.mapboxMap.addMapsIndoorsLayers()
         update()
     }
@@ -67,24 +55,19 @@ class MBTileProvider {
     }
 
     private func updateSource() throws {
-        var urlChanged = false
         if NetworkPathMonitor.shared.isConnected {
-            let newUrl = _tileProvider.templateUrl()
-            if templateUrl != newUrl {
-                templateUrl = newUrl
+            if templateUrl != _tileProvider.templateUrl() {
+                templateUrl = _tileProvider.templateUrl()
                 rasterSource.tiles = [templateUrl]
                 rasterSource.tileSize = _tileProvider.tileSize()
                 rasterSource.volatile = false
-                urlChanged = true
             }
         } else {
-            let newUrl = _tileProvider.offlineTemplateUrl()
-            if templateUrl != newUrl {
-                templateUrl = newUrl
+            if templateUrl != _tileProvider.offlineTemplateUrl() {
+                templateUrl = _tileProvider.offlineTemplateUrl()
                 rasterSource.tiles = [templateUrl]
                 rasterSource.tileSize = 256
                 rasterSource.volatile = true
-                urlChanged = true
             }
         }
 
@@ -92,9 +75,6 @@ class MBTileProvider {
             try mapView?.mapboxMap.addSource(rasterSource)
             return
         }
-
-        /// Only remove and re-add the source when the tile URL actually changed. Removing the source cancels all in-flight Mapbox tile network requests; doing this unnecessarily on every update() call causes tiles to never finish loading during rapid refresh cycles (e.g. initial load).
-        guard urlChanged else { return }
 
         ensureTileLayerIsRasterLayer()
 

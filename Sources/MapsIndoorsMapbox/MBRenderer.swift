@@ -66,33 +66,6 @@ class MBRenderer {
         configureForCollisionHandling(overlap: collisionHandling)
     }
 
-    deinit {
-        onImageUnusedCancelable?.cancel()
-        let annotations = Array(infoWindows.values)
-        Task { @MainActor in
-            for annotation in annotations {
-                annotation.remove()
-            }
-        }
-    }
-
-    /// Proactively releases the style-image observer and removes any
-    /// `ViewAnnotation`s this renderer attached to the host `MapView`.
-    /// Prefer this over relying on `deinit` so teardown runs on the main
-    /// actor rather than whichever thread happens to release the last
-    /// strong reference.
-    @MainActor
-    func cleanup() {
-        onImageUnusedCancelable?.cancel()
-        onImageUnusedCancelable = nil
-        let annotations = Array(infoWindows.values)
-        infoWindows.removeAll()
-        guard mapView != nil else { return }
-        for annotation in annotations {
-            annotation.remove()
-        }
-    }
-
     private func setupGeoJsonSource() throws {
         _geoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSource)
         _geoJsonSource?.data = nil
@@ -562,23 +535,6 @@ class MBRenderer {
         }
     }
 
-    var showMapMarkers: Bool? = nil {
-        didSet {
-            guard oldValue != showMapMarkers else { return }
-            do {
-                let visibility: Visibility = showMapMarkers == false ? .none : .visible
-                try map?.updateLayer(withId: Constants.LayerIDs.markerLayer, type: SymbolLayer.self) { layer in
-                    layer.visibility = .constant(visibility)
-                }
-                try map?.updateLayer(withId: Constants.LayerIDs.markerNoCollisionLayer, type: SymbolLayer.self) { layer in
-                    layer.visibility = .constant(visibility)
-                }
-            } catch {
-                MPLog.mapbox.error("Error updating marker visibility: \(error.localizedDescription)")
-            }
-        }
-    }
-
     // MARK: Collision handling
 
     struct MBOverlapSettings {
@@ -676,10 +632,12 @@ class MBRenderer {
                         return cacheHit
                     }
 
-                    try Task.checkCancellation()
-                    try await self.updateImage(for: model)
-                    try Task.checkCancellation()
-                    try await self.update2DModel(for: model)
+                    Task.detached(priority: .userInitiated) {
+                        try Task.checkCancellation()
+                        try await self.updateImage(for: model)
+                        try Task.checkCancellation()
+                        try await self.update2DModel(for: model)
+                    }
 
                     var features = [Feature]()
                     var featuresGeometry = [Feature]()
@@ -690,8 +648,8 @@ class MBRenderer {
 
                     if let marker = model.markerFeature {
                         if model.marker?.properties[.isCollidable] as? Bool ?? true == false {
-                            /// Non-collidable markers go only to the non-collision source. Adding to both sources causes the collision layer to hide the marker while the non-collision layer renders it, making it visible but not tappable.
                             featuresNonCollision.append(marker)
+                            features.append(marker)
                         } else {
                             features.append(marker)
                         }
@@ -906,7 +864,11 @@ class MBRenderer {
         }
     }
 
-    var enabled = true
+    var enabled = true {
+        didSet {
+            print("enabled: \(String(enabled))")
+        }
+    }
 
     @MainActor
     private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) async {
@@ -963,7 +925,6 @@ extension MPViewModel {
             feature.properties?[Key.labelGraphicContent.rawValue] = JSONValue(JSONArray(labelGraphicContent.map { JSONValue($0) }))
         }
         if let markerType = (marker.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(markerType) }
-        if let clickable = marker.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
@@ -981,7 +942,6 @@ extension MPViewModel {
         if let polygonStrokeOpacity = polygon.properties[.polygonStrokeOpacity] as? Double { feature.properties?[Key.polygonStrokeOpacity.rawValue] = JSONValue(polygonStrokeOpacity) }
         if let polygonStrokeWidth = polygon.properties[.polygonStrokeWidth] as? Double { feature.properties?[Key.polygonStrokeWidth.rawValue] = JSONValue(polygonStrokeWidth) }
         if let polygonType = (polygon.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(polygonType) }
-        if let clickable = polygon.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
@@ -1015,7 +975,6 @@ extension MPViewModel {
         if let model2DScale = model2D.properties[.model2DScale] as? Double { feature.properties?[Key.model2DScale.rawValue] = JSONValue(model2DScale) }
         if let model2DIsElevated = model2D.properties[.model2DIsElevated] as? Bool { feature.properties?[Key.model2DIsElevated.rawValue] = JSONValue(model2DIsElevated) }
         if let model2DType = (model2D.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(model2DType) }
-        if let clickable = model2D.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
@@ -1071,7 +1030,6 @@ extension MPViewModel {
             feature.properties?[Key.model3DRotation.rawValue] = JSONValue(JSONArray(rotation.map { JSONValue($0) }))
         }
         if let model3DType = (model3D.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(model3DType) }
-        if let clickable = model3D.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
@@ -1086,7 +1044,6 @@ extension MPViewModel {
         if let wallExtrusionColor = wallExtrusion.properties[.wallExtrusionColor] as? String { feature.properties?[Key.wallExtrusionColor.rawValue] = JSONValue(wallExtrusionColor) }
         if let wallExtrusionHeight = wallExtrusion.properties[.wallExtrusionHeight] as? Double { feature.properties?[Key.wallExtrusionHeight.rawValue] = JSONValue(wallExtrusionHeight) }
         if let wallExtrusionType = (wallExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(wallExtrusionType) }
-        if let clickable = wallExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
@@ -1101,7 +1058,6 @@ extension MPViewModel {
         if let featureExtrusionColor = featureExtrusion.properties[.featureExtrusionColor] as? String { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(featureExtrusionColor) }
         if let featureExtrusionHeight = featureExtrusion.properties[.featureExtrusionHeight] as? Double { feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(featureExtrusionHeight) }
         if let featureExtrusionType = (featureExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(featureExtrusionType) }
-        if let clickable = featureExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
     }
