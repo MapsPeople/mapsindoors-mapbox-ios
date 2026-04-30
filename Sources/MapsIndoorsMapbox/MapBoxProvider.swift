@@ -80,6 +80,11 @@ public class MapBoxProvider: MPMapProvider {
 
     private var renderer: MBRenderer?
 
+    /// In-flight render task. A new `setViewModels` cancels and awaits this
+    /// before starting its own render so two render task-groups never share
+    /// `MPViewModel` references.
+    @MainActor private var renderTask: Task<Void, Never>?
+
     private var _routeRenderer: MBRouteRenderer?
 
     public weak var view: UIView?
@@ -110,16 +115,27 @@ public class MapBoxProvider: MPMapProvider {
             configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
-        // TODO: These renderer setters are prone to BAD_ACCESS - investigate further protections
         // Ignore `forceClear` - not applicable to mapbox rendering
         renderer?.customInfoWindow = customInfoWindow
         renderer?.collisionHandling = collisionHandling
         renderer?.featureExtrusionOpacity = featureExtrusionOpacity
         renderer?.wallExtrusionOpacity = wallExtrusionOpacity
         renderer?.showMapMarkers = showMapMarkers
-        do {
-            try await renderer?.render(models: models)
-        } catch {}
+
+        // Serialize renders: cancel and await the predecessor so its task-group
+        // children release their `MPViewModel` captures before we hand a new
+        // models array to the renderer.
+        let previous = renderTask
+        previous?.cancel()
+        await previous?.value
+
+        let task = Task { @MainActor [weak self] in
+            do {
+                try await self?.renderer?.render(models: models)
+            } catch {}
+        }
+        renderTask = task
+        await task.value
     }
 
     public var cameraOperator: MPCameraOperator {

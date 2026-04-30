@@ -659,27 +659,87 @@ class MBRenderer {
 
     // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
     private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 10_000)
+
+    /// Value-typed inputs for the parallel fan-out. Built on MainActor so the
+    /// task-group children never touch the `any MPViewModel` existentials and
+    /// cannot race on their refcounts.
+    private struct ModelInputs: Sendable {
+        let cacheKey: String
+        let markerFeature: Feature?
+        let markerIsCollidable: Bool
+        let polygonFeature: Feature?
+        let floorPlanFeature: Feature?
+        let model2DFeature: Feature?
+        let model2DGeometryFeature: Feature?
+        let model3DFeature: Feature?
+        let wallExtrusionFeature: Feature?
+        let featureExtrusionFeature: Feature?
+    }
+
     func render(models: [any MPViewModel]) async throws {
         try Task.checkCancellation()
         let startTime = DispatchTime.now()
         await self.removeOldModels(models: models)
         try Task.checkCancellation()
-        let generatedModels = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+
+        // Snapshot phase: extract every Feature this render needs into a
+        // Sendable value-typed array on MainActor. The parallel fan-out below
+        // then operates exclusively on `ModelInputs` and never reaches back
+        // into the `any MPViewModel` existentials.
+        let inputs: [ModelInputs] = await MainActor.run { [isFloorPlanEnabled, is2dModelsEnabled, isWallExtrusionsEnabled, isFeatureExtrusionsEnabled] in
+            var arr: [ModelInputs] = []
+            arr.reserveCapacity(models.count)
             for model in models {
+                arr.append(
+                    ModelInputs(
+                        cacheKey: model.featureCacheKey,
+                        markerFeature: model.markerFeature,
+                        markerIsCollidable: (model.marker?.properties[.isCollidable] as? Bool) ?? true,
+                        polygonFeature: model.polygonFeature,
+                        floorPlanFeature: isFloorPlanEnabled ? model.floorPlanFeature : nil,
+                        model2DFeature: is2dModelsEnabled ? model.model2DFeature : nil,
+                        model2DGeometryFeature: is2dModelsEnabled ? model.model2DGeometryFeature : nil,
+                        model3DFeature: model.model3DFeature,
+                        wallExtrusionFeature: isWallExtrusionsEnabled ? model.wallExtrusionFeature : nil,
+                        featureExtrusionFeature: isFeatureExtrusionsEnabled ? model.featureExtrusionFeature : nil
+                    ))
+            }
+            return arr
+        }
+
+        try Task.checkCancellation()
+
+        // MainActor-only side-effects, lifted out of the fan-out so the
+        // task-group below holds no `any MPViewModel` captures. These three
+        // helpers were already `@MainActor`, so they were de-facto serialised
+        // before; the only behavioural change is the order — info-window
+        // updates run for all models, then image / 2D-model uploads run for
+        // cache misses only (matching the previous gating).
+        for model in models {
+            try Task.checkCancellation()
+            await updateInfoWindow(for: model)
+        }
+        for (idx, input) in inputs.enumerated() {
+            let cached = lock.locked { self.modelCache[input.cacheKey] }
+            if cached != nil { continue }
+            try Task.checkCancellation()
+            try await updateImage(for: models[idx])
+            try Task.checkCancellation()
+            try await update2DModel(for: models[idx])
+        }
+
+        try Task.checkCancellation()
+
+        let generatedModels = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+            for input in inputs {
                 _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [weak self] in
                     guard let self else { return ([], [], [], [], [], []) }
 
-                    await updateInfoWindow(for: model)
-
-                    let cacheKey = model.featureCacheKey
-                    if let cacheHit = lock.locked({ self.modelCache[cacheKey] }) {
+                    if let cacheHit = lock.locked({ self.modelCache[input.cacheKey] }) {
                         return cacheHit
                     }
 
                     try Task.checkCancellation()
-                    try await self.updateImage(for: model)
-                    try Task.checkCancellation()
-                    try await self.update2DModel(for: model)
 
                     var features = [Feature]()
                     var featuresGeometry = [Feature]()
@@ -688,8 +748,8 @@ class MBRenderer {
                     var featuresWalls = [Feature]()
                     var features3DModels = [Feature]()
 
-                    if let marker = model.markerFeature {
-                        if model.marker?.properties[.isCollidable] as? Bool ?? true == false {
+                    if let marker = input.markerFeature {
+                        if input.markerIsCollidable == false {
                             /// Non-collidable markers go only to the non-collision source. Adding to both sources causes the collision layer to hide the marker while the non-collision layer renders it, making it visible but not tappable.
                             featuresNonCollision.append(marker)
                         } else {
@@ -699,20 +759,20 @@ class MBRenderer {
 
                     try Task.checkCancellation()
 
-                    if let polygon = model.polygonFeature {
+                    if let polygon = input.polygonFeature {
                         featuresGeometry.append(polygon)
                     }
 
                     try Task.checkCancellation()
 
-                    if isFloorPlanEnabled, let floorPlan = model.floorPlanFeature {
+                    if let floorPlan = input.floorPlanFeature {
                         featuresGeometry.append(floorPlan)
                     }
 
                     try Task.checkCancellation()
 
-                    if is2dModelsEnabled, let model2D = model.model2DFeature,
-                        let model2DGeometry = model.model2DGeometryFeature
+                    if let model2D = input.model2DFeature,
+                        let model2DGeometry = input.model2DGeometryFeature
                     {
                         features.append(model2D)
                         featuresGeometry.append(model2DGeometry)
@@ -720,19 +780,19 @@ class MBRenderer {
 
                     try Task.checkCancellation()
 
-                    if let model3D = model.model3DFeature {
+                    if let model3D = input.model3DFeature {
                         features3DModels.append(model3D)
                     }
 
                     try Task.checkCancellation()
 
-                    if isWallExtrusionsEnabled, let wallExtrusionLayer = model.wallExtrusionFeature {
+                    if let wallExtrusionLayer = input.wallExtrusionFeature {
                         featuresWalls.append(wallExtrusionLayer)
                     }
 
                     try Task.checkCancellation()
 
-                    if isFeatureExtrusionsEnabled, let featureExtrusionLayer = model.featureExtrusionFeature {
+                    if let featureExtrusionLayer = input.featureExtrusionFeature {
                         featuresExtrusions.append(featureExtrusionLayer)
                     }
 
@@ -740,7 +800,7 @@ class MBRenderer {
 
                     let result = (features, featuresGeometry, featuresNonCollision, featuresExtrusions, featuresWalls, features3DModels)
 
-                    lock.locked { self.modelCache[cacheKey] = result }
+                    lock.locked { self.modelCache[input.cacheKey] = result }
 
                     return result
                 }
