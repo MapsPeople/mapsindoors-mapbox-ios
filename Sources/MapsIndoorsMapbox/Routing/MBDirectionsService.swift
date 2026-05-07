@@ -10,16 +10,16 @@ class MBDirectionsService: MPExternalDirectionsService {
 
     func query(origin: CLLocationCoordinate2D, destination: CLLocationCoordinate2D, config: MPDirectionsConfig) async throws -> MPRoute? {
         let profile =
-            switch config.travelMode {
-            case .walking:
-                "mapbox/walking"
-            case .bicycling:
-                "mapbox/cycling"
-            case .driving:
-                "mapbox/driving"
-            default:
-                ""
-            }
+        switch config.travelMode {
+        case .walking:
+            "mapbox/walking"
+        case .bicycling:
+            "mapbox/cycling"
+        case .driving:
+            "mapbox/driving"
+        default:
+            ""
+        }
 
         let originString = "\(origin.longitude),\(origin.latitude)"
         let destinationString = "\(destination.longitude),\(destination.latitude)"
@@ -61,7 +61,7 @@ class MBDirectionsService: MPExternalDirectionsService {
 
         do {
             let directionsResponse = try JSONDecoder().decode(MapboxDirections.self, from: data)
-            let result = directionsResponse.routes?.first?.toMPRoute
+            let result = directionsResponse.routes?.first?.toMPRoute(travelMode: config.travelMode.description)
             return result
         } catch {
             MPLog.mapbox.error("Failed deserialize the response from the Mapbox Directions API! \(error)")
@@ -71,7 +71,7 @@ class MBDirectionsService: MPExternalDirectionsService {
 }
 
 extension Route {
-    var toMPRoute: MPRouteInternal {
+    func toMPRoute(travelMode: String) -> MPRouteInternal {
         let mpRoute = MPRouteInternal()
 
         for mapboxLeg in legs ?? [] {
@@ -84,7 +84,19 @@ extension Route {
 
             for mapboxstep in mapboxLeg.steps ?? [] {
                 let mpStep = MPRouteStepInternal()
-                mpStep.html_instructions = mapboxstep.maneuver?.instruction ?? ""
+                if let instruction = mapboxstep.maneuver?.instruction, let streetName = mapboxstep.name, !streetName.isEmpty,
+                   mapboxstep.maneuver?.type != "arrive" && mapboxstep.maneuver?.type != "depart",
+                   instruction.range(of: streetName, options: .caseInsensitive) == nil {
+                    mpStep.html_instructions = "\(instruction) on \(streetName)"
+                } else {
+                    mpStep.html_instructions = mapboxstep.maneuver?.instruction ?? ""
+                }
+                if let type = mapboxstep.maneuver?.type, type == "arrive" || type == "depart" {
+                    mpStep.maneuver = type
+                } else {
+                    mpStep.maneuver = mapboxstep.maneuver?.modifier ?? mapboxstep.maneuver?.type ?? ""
+                }
+                mpStep.travel_mode = travelMode
                 mpStep.distance = (mapboxstep.distance ?? 0) as NSNumber
                 mpStep.duration = (mapboxstep.duration ?? 0) as NSNumber
 
@@ -100,6 +112,20 @@ extension Route {
                         geometry.append(x)
                     }
                     mpStep.geometry = geometry
+
+                    if let first = geometry.first {
+                        mpStep.start_location = first
+                    }
+                    if let last = geometry.last {
+                        mpStep.end_location = last
+                    }
+                } else if let maneuverLocation = mapboxstep.maneuver?.location, maneuverLocation.count == 2 {
+                    let coord = MPRouteCoordinateInternal()
+                    coord.lng = maneuverLocation[0] as NSNumber
+                    coord.lat = maneuverLocation[1] as NSNumber
+                    coord.zLevel = 0.0
+                    mpStep.start_location = coord
+                    mpStep.end_location = coord
                 } else {
                     MPLog.mapbox.error("Unable to deserialize directions geometry!")
                 }
@@ -114,7 +140,7 @@ extension Route {
                 mpLeg.start_location = legStart
             }
 
-            if let endLocation = mpLeg.steps.first?.start_location {
+            if let endLocation = mpLeg.steps.last?.end_location {
                 let legEnd = MPRouteCoordinateInternal()
                 legEnd.lat = endLocation.lat as NSNumber
                 legEnd.lng = endLocation.lng as NSNumber

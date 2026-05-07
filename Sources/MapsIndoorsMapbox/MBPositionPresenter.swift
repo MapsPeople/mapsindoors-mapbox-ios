@@ -27,9 +27,13 @@ class MBPositionPresenter: MPPositionPresenter {
         circleStrokeColor: UIColor,
         circleStrokeWidth: Double
     ) {
-        guard let map else { return }
+        // Fast-path early-out only. Do not bind `map` here: it's a weak var,
+        // and binding strongly would let the dispatched closure outlive the
+        // map, defeating the inner re-fetch from `self.map` after the hop.
+        guard map != nil else { return }
 
-        DispatchQueue.main.async { [self] in
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let map = self.map, map.isStyleLoaded else { return }
             addSourcesAndLayersIfNotPresent()
             do {
                 try map.moveLayer(withId: layerBlueDotCircle, to: .above(Constants.LayerIDs.tileLayer))
@@ -50,7 +54,7 @@ class MBPositionPresenter: MPPositionPresenter {
                     markerLayer.visibility = .constant(.visible)
                     markerLayer.iconOpacity = .constant(markerOpacity)
                     markerLayer.iconRotate = .constant(markerBearing)
-                    markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { blueDotIconId } })
+                    markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { self.blueDotIconId } })
                     markerLayer.iconRotationAlignment = .constant(.map)
                     markerLayer.iconPitchAlignment = .constant(.map)
                     markerLayer.iconAllowOverlap = .constant(true)
@@ -73,16 +77,23 @@ class MBPositionPresenter: MPPositionPresenter {
     }
 
     func clear() {
-        guard let map else { return }
+        // See `apply` for why we don't bind `map` here: weak var, re-fetched
+        // inside the dispatched closure to observe deallocation after hop.
+        guard map != nil else { return }
 
-        DispatchQueue.main.async { [self] in
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let map = self.map, map.isStyleLoaded else { return }
             do {
-                try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
-                    circleLayer.visibility = .constant(.none)
+                if map.layerExists(withId: layerBlueDotCircle) {
+                    try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
+                        circleLayer.visibility = .constant(.none)
+                    }
                 }
 
-                try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
-                    markerLayer.visibility = .constant(.none)
+                if map.layerExists(withId: layerBlueDotMarker) {
+                    try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
+                        markerLayer.visibility = .constant(.none)
+                    }
                 }
             } catch {}
         }

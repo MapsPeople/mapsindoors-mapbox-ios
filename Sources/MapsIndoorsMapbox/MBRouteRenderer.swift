@@ -64,7 +64,19 @@ class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    func apply(model: RouteViewModelProducer, animate: Bool, duration: TimeInterval, repeating: Bool, primaryColor: UIColor, secondaryColor: UIColor, primaryWidth: Float, secondaryWidth: Float, pathSmoothing _: Bool) {
+    func apply(model: RouteViewModelProducer, animate: Bool, duration: TimeInterval, repeating: Bool, primaryColor: UIColor, secondaryColor: UIColor, primaryWidth: Float, secondaryWidth: Float, pathSmoothing: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.applyOnMain(model: model, animate: animate, duration: duration, repeating: repeating, primaryColor: primaryColor, secondaryColor: secondaryColor, primaryWidth: primaryWidth, secondaryWidth: secondaryWidth, pathSmoothing: pathSmoothing)
+        }
+    }
+
+    private func applyOnMain(model: RouteViewModelProducer, animate: Bool, duration: TimeInterval, repeating: Bool, primaryColor: UIColor, secondaryColor: UIColor, primaryWidth: Float, secondaryWidth: Float, pathSmoothing _: Bool) {
+        // Cancel any in-flight animator before the style guard so a superseded
+        // route doesn't keep ticking against stale geometry if the style isn't loaded yet.
+        valueAnimator?.pause()
+        valueAnimator = nil
+        guard let mapView, mapView.mapboxMap.isStyleLoaded else { return }
+
         configureSources()
 
         route = model.polyline
@@ -73,9 +85,9 @@ class MBRouteRenderer: MPRouteRenderer {
         let geom = LineString(route).geometry
 
         do {
-            if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
-                try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.routeMarkerLayer, type: SymbolLayer.self) { symbolLayer in
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
+                try mapView.mapboxMap.updateLayer(withId: Constants.LayerIDs.routeMarkerLayer, type: SymbolLayer.self) { symbolLayer in
                     symbolLayer.source = Constants.SourceIDs.routeMarkerSource
                     symbolLayer.iconAllowOverlap = .constant(true)
                     symbolLayer.textAllowOverlap = .constant(true)
@@ -100,9 +112,9 @@ class MBRouteRenderer: MPRouteRenderer {
         }
 
         do {
-            if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
-                try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.lineLayer, type: LineLayer.self) { lineLayer in
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
+                try mapView.mapboxMap.updateLayer(withId: Constants.LayerIDs.lineLayer, type: LineLayer.self) { lineLayer in
                     lineLayer.lineColor = .constant(StyleColor(primaryColor))
                     lineLayer.lineWidth = .constant(Double(primaryWidth))
                     lineLayer.lineCap = .constant(.butt)
@@ -118,8 +130,8 @@ class MBRouteRenderer: MPRouteRenderer {
         do {
             let features = try JSONDecoder().decode([Feature].self, from: markerJson.data(using: .utf8)!)
             let geojson = GeoJSONObject.featureCollection(FeatureCollection(features: features))
-            if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.routeMarkerSource, geoJSON: geojson)
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.routeMarkerSource, geoJSON: geojson)
             }
         } catch {
             MPLog.mapbox.error("Error updating start/end marker data in route renderer!")
@@ -129,17 +141,17 @@ class MBRouteRenderer: MPRouteRenderer {
         do {
             if let start = model.start {
                 if let icon = start.data[.icon] as? UIImage {
-                    try mapView?.mapboxMap.addImage(icon, id: start.id, sdf: false)
+                    try mapView.mapboxMap.addImage(icon, id: start.id, sdf: false)
                 }
             }
             if let end = model.end {
                 if let icon = end.data[.icon] as? UIImage {
-                    try mapView?.mapboxMap.addImage(icon, id: end.id, sdf: false)
+                    try mapView.mapboxMap.addImage(icon, id: end.id, sdf: false)
                 }
             }
             for stop in model.stops ?? [] {
                 if let icon = stop.data[.icon] as? UIImage {
-                    try mapView?.mapboxMap.addImage(icon, id: stop.id, sdf: false)
+                    try mapView.mapboxMap.addImage(icon, id: stop.id, sdf: false)
                 }
             }
         } catch {
@@ -148,7 +160,7 @@ class MBRouteRenderer: MPRouteRenderer {
 
         if animate {
             do {
-                try mapView?.mapboxMap.updateLayer(withId: Constants.LayerIDs.animatedLineLayer, type: LineLayer.self) { lineLayer in
+                try mapView.mapboxMap.updateLayer(withId: Constants.LayerIDs.animatedLineLayer, type: LineLayer.self) { lineLayer in
                     lineLayer.lineColor = .constant(StyleColor(secondaryColor))
                     lineLayer.lineWidth = .constant(Double(secondaryWidth))
                     lineLayer.lineCap = .constant(.butt)
@@ -246,29 +258,36 @@ class MBRouteRenderer: MPRouteRenderer {
     }
 
     func clear() {
+        DispatchQueue.main.async { [weak self] in
+            self?.clearOnMain()
+        }
+    }
+
+    private func clearOnMain() {
         route = [CLLocationCoordinate2D]()
         valueAnimator?.pause()
         valueAnimator = nil
+        guard let mapView, mapView.mapboxMap.isStyleLoaded else { return }
         do {
             // Clear polyline
             let geom = LineString([]).geometry
-            if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.lineSource, geoJSON: GeoJSONObject.geometry(geom))
             }
-            if mapView?.mapboxMap?.sourceExists(withId: Constants.SourceIDs.animatedLineSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.animatedLineSource, geoJSON: GeoJSONObject.geometry(geom))
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.animatedLineSource, geoJSON: GeoJSONObject.geometry(geom))
             }
 
             // Clear markers
             let features = GeoJSONObject.featureCollection(FeatureCollection(features: [Feature]()))
-            if mapView?.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) ?? false {
-                mapView?.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.routeMarkerSource, geoJSON: features)
+            if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) {
+                mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.routeMarkerSource, geoJSON: features)
             }
-            if mapView?.mapboxMap.imageExists(withId: "start_marker") ?? false {
-                try mapView?.mapboxMap.removeImage(withId: "start_marker")
+            if mapView.mapboxMap.imageExists(withId: "start_marker") {
+                try mapView.mapboxMap.removeImage(withId: "start_marker")
             }
-            if mapView?.mapboxMap.imageExists(withId: "end_marker") ?? false {
-                try mapView?.mapboxMap.removeImage(withId: "end_marker")
+            if mapView.mapboxMap.imageExists(withId: "end_marker") {
+                try mapView.mapboxMap.removeImage(withId: "end_marker")
             }
         } catch {
             MPLog.mapbox.error("Error clearing route data from mapbox map!")

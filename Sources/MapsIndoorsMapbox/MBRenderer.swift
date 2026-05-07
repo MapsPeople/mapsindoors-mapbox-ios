@@ -562,23 +562,6 @@ class MBRenderer {
         }
     }
 
-    var showMapMarkers: Bool? = nil {
-        didSet {
-            guard oldValue != showMapMarkers else { return }
-            do {
-                let visibility: Visibility = showMapMarkers == false ? .none : .visible
-                try map?.updateLayer(withId: Constants.LayerIDs.markerLayer, type: SymbolLayer.self) { layer in
-                    layer.visibility = .constant(visibility)
-                }
-                try map?.updateLayer(withId: Constants.LayerIDs.markerNoCollisionLayer, type: SymbolLayer.self) { layer in
-                    layer.visibility = .constant(visibility)
-                }
-            } catch {
-                MPLog.mapbox.error("Error updating marker visibility: \(error.localizedDescription)")
-            }
-        }
-    }
-
     // MARK: Collision handling
 
     struct MBOverlapSettings {
@@ -676,6 +659,7 @@ class MBRenderer {
         let featureExtrusionFeature: Feature?
     }
 
+    @MainActor
     func render(models: [any MPViewModel]) async throws {
         try Task.checkCancellation()
         let startTime = DispatchTime.now()
@@ -686,46 +670,41 @@ class MBRenderer {
         // Sendable value-typed array on MainActor. The parallel fan-out below
         // then operates exclusively on `ModelInputs` and never reaches back
         // into the `any MPViewModel` existentials.
-        let inputs: [ModelInputs] = await MainActor.run { [isFloorPlanEnabled, is2dModelsEnabled, isWallExtrusionsEnabled, isFeatureExtrusionsEnabled] in
-            var arr: [ModelInputs] = []
-            arr.reserveCapacity(models.count)
-            for model in models {
-                arr.append(
-                    ModelInputs(
-                        cacheKey: model.featureCacheKey,
-                        markerFeature: model.markerFeature,
-                        markerIsCollidable: (model.marker?.properties[.isCollidable] as? Bool) ?? true,
-                        polygonFeature: model.polygonFeature,
-                        floorPlanFeature: isFloorPlanEnabled ? model.floorPlanFeature : nil,
-                        model2DFeature: is2dModelsEnabled ? model.model2DFeature : nil,
-                        model2DGeometryFeature: is2dModelsEnabled ? model.model2DGeometryFeature : nil,
-                        model3DFeature: model.model3DFeature,
-                        wallExtrusionFeature: isWallExtrusionsEnabled ? model.wallExtrusionFeature : nil,
-                        featureExtrusionFeature: isFeatureExtrusionsEnabled ? model.featureExtrusionFeature : nil
-                    ))
-            }
-            return arr
+        var inputs: [ModelInputs] = []
+        inputs.reserveCapacity(models.count)
+        for model in models {
+            inputs.append(
+                ModelInputs(
+                    cacheKey: model.featureCacheKey,
+                    markerFeature: model.markerFeature,
+                    markerIsCollidable: (model.marker?.properties[.isCollidable] as? Bool) ?? true,
+                    polygonFeature: model.polygonFeature,
+                    floorPlanFeature: isFloorPlanEnabled ? model.floorPlanFeature : nil,
+                    model2DFeature: is2dModelsEnabled ? model.model2DFeature : nil,
+                    model2DGeometryFeature: is2dModelsEnabled ? model.model2DGeometryFeature : nil,
+                    model3DFeature: model.model3DFeature,
+                    wallExtrusionFeature: isWallExtrusionsEnabled ? model.wallExtrusionFeature : nil,
+                    featureExtrusionFeature: isFeatureExtrusionsEnabled ? model.featureExtrusionFeature : nil
+                ))
         }
 
         try Task.checkCancellation()
 
         // MainActor-only side-effects, lifted out of the fan-out so the
-        // task-group below holds no `any MPViewModel` captures. These three
-        // helpers were already `@MainActor`, so they were de-facto serialised
-        // before; the only behavioural change is the order — info-window
-        // updates run for all models, then image / 2D-model uploads run for
-        // cache misses only (matching the previous gating).
+        // task-group below holds no `any MPViewModel` captures. Pair each
+        // input with its source model via `zip` so the loop can never drift
+        // from the snapshot order if filtering is added later.
         for model in models {
             try Task.checkCancellation()
             await updateInfoWindow(for: model)
         }
-        for (idx, input) in inputs.enumerated() {
+        for (input, model) in zip(inputs, models) {
             let cached = lock.locked { self.modelCache[input.cacheKey] }
             if cached != nil { continue }
             try Task.checkCancellation()
-            try await updateImage(for: models[idx])
+            try await updateImage(for: model)
             try Task.checkCancellation()
-            try await update2DModel(for: models[idx])
+            try await update2DModel(for: model)
         }
 
         try Task.checkCancellation()

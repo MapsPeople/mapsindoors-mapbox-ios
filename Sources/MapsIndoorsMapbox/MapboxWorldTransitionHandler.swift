@@ -106,12 +106,12 @@ class MapboxWorldTransitionHandler {
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
         try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
 
-        if map.showMapboxMapMarkers != false {
+        if map.showMapboxMapMarkers == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
         }
-        if let show = map.showMapboxRoadLabels, show == true {
+        if map.showMapboxRoadLabels == true {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
         }
     }
@@ -131,7 +131,7 @@ class MapboxWorldTransitionHandler {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
         }
-        if let show = map.showMapboxRoadLabels, show == true {
+        if map.showMapboxRoadLabels != false {
             try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
         }
     }

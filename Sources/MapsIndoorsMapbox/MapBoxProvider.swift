@@ -31,15 +31,6 @@ public class MapBoxProvider: MPMapProvider {
         }
     }
 
-    public var showMapMarkers: Bool? = nil {
-        didSet {
-            guard oldValue != showMapMarkers else { return }
-            /// Mirror into `showMapboxMapMarkers`; its didSet schedules the style re-apply,
-            /// so we deliberately don't schedule one here (avoids double-invocation).
-            showMapboxMapMarkers = showMapMarkers
-        }
-    }
-
     /// Controls visibility of Mapbox base-map road labels.
     /// `nil` (default) and `true` show them; `false` hides them.
     public var showMapboxRoadLabels: Bool? {
@@ -115,19 +106,20 @@ public class MapBoxProvider: MPMapProvider {
             configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
+        // Serialize renders: cancel and await the predecessor so its task-group
+        // children release their `MPViewModel` captures before we hand a new
+        // models array to the renderer. Renderer property assignments are done
+        // *after* this barrier so the predecessor's in-flight render cannot
+        // observe mid-flight mutation of these settings.
+        let previous = renderTask
+        previous?.cancel()
+        await previous?.value
+
         // Ignore `forceClear` - not applicable to mapbox rendering
         renderer?.customInfoWindow = customInfoWindow
         renderer?.collisionHandling = collisionHandling
         renderer?.featureExtrusionOpacity = featureExtrusionOpacity
         renderer?.wallExtrusionOpacity = wallExtrusionOpacity
-        renderer?.showMapMarkers = showMapMarkers
-
-        // Serialize renders: cancel and await the predecessor so its task-group
-        // children release their `MPViewModel` captures before we hand a new
-        // models array to the renderer.
-        let previous = renderTask
-        previous?.cancel()
-        await previous?.value
 
         let task = Task { @MainActor [weak self] in
             do {
