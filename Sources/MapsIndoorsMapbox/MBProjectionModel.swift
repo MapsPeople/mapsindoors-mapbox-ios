@@ -2,6 +2,7 @@ import Foundation
 import MapboxMaps
 import MapsIndoorsCore
 
+@MainActor
 class MBProjectionModel: MPProjection {
     private weak var view: MapView?
 
@@ -12,7 +13,6 @@ class MBProjectionModel: MPProjection {
     init() {}
 
     var visibleRegion: MPGeoRegion {
-        @MainActor
         get async {
             guard let view else { return MPGeoRegion(nearLeft: CLLocationCoordinate2D(), farLeft: CLLocationCoordinate2D(), farRight: CLLocationCoordinate2D(), nearRight: CLLocationCoordinate2D()) }
 
@@ -62,12 +62,10 @@ class MBProjectionModel: MPProjection {
         }
     }
 
-    @MainActor
     func coordinateFor(point: CGPoint) async -> CLLocationCoordinate2D {
         view?.mapboxMap.coordinate(for: point) ?? CLLocationCoordinate2D()
     }
 
-    @MainActor
     func pointFor(coordinate: CLLocationCoordinate2D) async -> CGPoint {
         view?.mapboxMap.point(for: coordinate) ?? .zero
     }

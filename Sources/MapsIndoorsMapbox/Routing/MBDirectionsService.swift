@@ -10,16 +10,16 @@ class MBDirectionsService: MPExternalDirectionsService {
 
     func query(origin: CLLocationCoordinate2D, destination: CLLocationCoordinate2D, config: MPDirectionsConfig) async throws -> MPRoute? {
         let profile =
-        switch config.travelMode {
-        case .walking:
-            "mapbox/walking"
-        case .bicycling:
-            "mapbox/cycling"
-        case .driving:
-            "mapbox/driving"
-        default:
-            ""
-        }
+            switch config.travelMode {
+            case .walking:
+                "mapbox/walking"
+            case .bicycling:
+                "mapbox/cycling"
+            case .driving:
+                "mapbox/driving"
+            default:
+                ""
+            }
 
         let originString = "\(origin.longitude),\(origin.latitude)"
         let destinationString = "\(destination.longitude),\(destination.latitude)"
@@ -85,8 +85,9 @@ extension Route {
             for mapboxstep in mapboxLeg.steps ?? [] {
                 let mpStep = MPRouteStepInternal()
                 if let instruction = mapboxstep.maneuver?.instruction, let streetName = mapboxstep.name, !streetName.isEmpty,
-                   mapboxstep.maneuver?.type != "arrive" && mapboxstep.maneuver?.type != "depart",
-                   instruction.range(of: streetName, options: .caseInsensitive) == nil {
+                    mapboxstep.maneuver?.type != "arrive" && mapboxstep.maneuver?.type != "depart",
+                    instruction.range(of: streetName, options: .caseInsensitive) == nil
+                {
                     mpStep.html_instructions = "\(instruction) on \(streetName)"
                 } else {
                     mpStep.html_instructions = mapboxstep.maneuver?.instruction ?? ""

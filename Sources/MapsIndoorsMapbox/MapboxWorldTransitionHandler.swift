@@ -2,6 +2,15 @@ import Foundation
 import MapboxMaps
 import MapsIndoorsCore
 
+/// Test seam over the subset of `MapboxMap` this handler actually exercises.
+/// Tests inject a recording fake to assert per-flag writes without standing up
+/// a real Mapbox style.
+protocol MBStyleImportConfigSetting: AnyObject {
+    func setStyleImportConfigProperty(for importId: String, config: String, value: Any) throws
+}
+
+extension MapboxMap: MBStyleImportConfigSetting {}
+
 class MapboxWorldTransitionHandler {
     private let baseMap = "basemap"
     private let placeLabels = "showPlaceLabels"
@@ -32,33 +41,43 @@ class MapboxWorldTransitionHandler {
     /// Tracks the last applied marker/road label config to avoid redundant calls
     private var lastAppliedMarkerConfig: (showMarkers: Bool?, showRoads: Bool?)?
 
+    /// Test injection point — when non-nil, all style-import writes route here
+    /// instead of the live `MapboxMap`. Internal so `@testable import` tests can
+    /// assert the exact writes per flag combination.
+    internal var mapboxMapOverride: MBStyleImportConfigSetting?
+
+    private var activeMapboxMap: MBStyleImportConfigSetting? {
+        mapboxMapOverride ?? map?.mapView?.mapboxMap
+    }
+
     /// Overridable so tests can subclass via `@testable import` and count invocations
     /// scheduled by `MapBoxProvider` property didSet observers.
     @MainActor
     func configureMapsIndoorsVsMapboxVisiblity() async {
-        guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
+        guard let map, let activeMapboxMap else { return }
 
         do {
             // Only apply marker/label config when it actually changes
             let currentMarkerConfig = (showMarkers: map.showMapboxMapMarkers, showRoads: map.showMapboxRoadLabels)
-            let markerConfigChanged = lastAppliedMarkerConfig == nil
+            let markerConfigChanged =
+                lastAppliedMarkerConfig == nil
                 || lastAppliedMarkerConfig?.showMarkers != currentMarkerConfig.showMarkers
                 || lastAppliedMarkerConfig?.showRoads != currentMarkerConfig.showRoads
 
             if markerConfigChanged {
-                if let showPlacesAndPois = map.showMapboxMapMarkers {
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: showPlacesAndPois)
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: showPlacesAndPois)
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: showPlacesAndPois)
+                if map.showMapboxMapMarkers == true {
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
                 } else {
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: false)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: false)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
                 }
-                if let showRoads = map.showMapboxRoadLabels {
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: showRoads)
+                if map.showMapboxRoadLabels == true {
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
                 } else {
-                    try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
+                    try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
                 }
                 lastAppliedMarkerConfig = currentMarkerConfig
             }
@@ -89,7 +108,7 @@ class MapboxWorldTransitionHandler {
             }
 
             if enableMapboxBuildings == false {
-                try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
+                try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
             }
         } catch {
             MPLog.mapbox.info("Failed to configure style config properties.")
@@ -98,41 +117,52 @@ class MapboxWorldTransitionHandler {
 
     /// Hide all Mapbox content which interfering with MapsIndoors content
     private func applyShowMapsIndoorsWorld() throws {
-        guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
+        guard let map, let activeMapboxMap else { return }
 
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: false)
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: false)
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
+        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
 
         if map.showMapboxMapMarkers == true {
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+        } else {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: false)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: false)
         }
+
         if map.showMapboxRoadLabels == true {
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
+        } else {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
         }
     }
 
     private func applyShowIntermediaryWorld() throws {
-        guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.5)
+        guard let activeMapboxMap else { return }
+        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.5)
     }
 
     /// Show all Mapbox content, if enabled
     private func applyShowMapboxWorld() throws {
-        guard let map, let mapboxMap = map.mapView?.mapboxMap else { return }
+        guard let map, let activeMapboxMap else { return }
 
-        try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: enableMapboxBuildings ? 1.0 : 0.0)
-        if map.showMapboxMapMarkers != false {
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
+        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: enableMapboxBuildings ? 1.0 : 0.0)
+
+        if map.showMapboxMapMarkers == true {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
+        } else {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: false)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: false)
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: false)
         }
-        if map.showMapboxRoadLabels != false {
-            try mapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
+
+        if map.showMapboxRoadLabels == true {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: true)
+        } else {
+            try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
         }
     }
 }

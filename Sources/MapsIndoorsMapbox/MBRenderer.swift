@@ -8,6 +8,7 @@ private class InfoWindowTapRecognizer: UITapGestureRecognizer {
     var modelId = String()
 }
 
+@MainActor
 class MBRenderer {
     /// The scale of an object relative to being zoomed out to zoom level 1 (from zoom level 22) 1/(2^22)
     static let zoom22Scale: Double = 1 / pow(2, 22)
@@ -22,8 +23,8 @@ class MBRenderer {
     private var _clippingSource: GeoJSONSource?
     private weak var mapView: MapView?
 
-    @MainActor private var _lastModels = Set<AnyHashable>()
-    private var lock = UnfairLock()
+    private var _lastModels = Set<AnyHashable>()
+    nonisolated(unsafe) private var lock = UnfairLock()
 
     // Dictionary to store created info windows
     private var infoWindows = MPThreadSafeDictionary<String, ViewAnnotation>()
@@ -81,7 +82,6 @@ class MBRenderer {
     /// Prefer this over relying on `deinit` so teardown runs on the main
     /// actor rather than whichever thread happens to release the last
     /// strong reference.
-    @MainActor
     func cleanup() {
         onImageUnusedCancelable?.cancel()
         onImageUnusedCancelable = nil
@@ -503,20 +503,23 @@ class MBRenderer {
         }
     }
 
+    // `modelCache` is `nonisolated(unsafe)` and is read/written from
+    // off-MainActor task-group children inside `render()` under `lock`.
+    // Flag-flip clears must take the same lock to avoid racing those readers.
     var isFeatureExtrusionsEnabled = false {
-        didSet { if oldValue != isFeatureExtrusionsEnabled { modelCache.removeAll() } }
+        didSet { if oldValue != isFeatureExtrusionsEnabled { lock.locked { modelCache.removeAll() } } }
     }
 
     var isWallExtrusionsEnabled = false {
-        didSet { if oldValue != isWallExtrusionsEnabled { modelCache.removeAll() } }
+        didSet { if oldValue != isWallExtrusionsEnabled { lock.locked { modelCache.removeAll() } } }
     }
 
     var is2dModelsEnabled = false {
-        didSet { if oldValue != is2dModelsEnabled { modelCache.removeAll() } }
+        didSet { if oldValue != is2dModelsEnabled { lock.locked { modelCache.removeAll() } } }
     }
 
     var isFloorPlanEnabled = false {
-        didSet { if oldValue != isFloorPlanEnabled { modelCache.removeAll() } }
+        didSet { if oldValue != isFloorPlanEnabled { lock.locked { modelCache.removeAll() } } }
     }
 
     var featureExtrusionOpacity: Double = 0 {
@@ -624,7 +627,6 @@ class MBRenderer {
         provider?.onInfoWindowTapped(locationId: sender.modelId)
     }
 
-    @MainActor
     private func removeOldModels(models: [any MPViewModel]) async {
         let modelsNoLongerInView = _lastModels.subtracting(models as! [AnyHashable])
         for model in modelsNoLongerInView {
@@ -637,11 +639,14 @@ class MBRenderer {
 
     func invalidateRenderCache() {
         imagesAdded.removeAll()
-        self.modelCache.removeAll()
+        // `modelCache` is `nonisolated(unsafe)` and is read/written from
+        // off-MainActor task-group children inside `render()` under `lock`.
+        // The clear must take the same lock to avoid racing those readers.
+        self.lock.locked { self.modelCache.removeAll() }
     }
 
     // LRU cache for storing computed GeoJSON -> Mapbox Feature results, as a heuristic to optimize the rendering pipeline's performance.
-    private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 10_000)
+    nonisolated(unsafe) private var modelCache = LRUCache<String, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])>(countLimit: 10_000)
 
     /// Value-typed inputs for the parallel fan-out. Built on MainActor so the
     /// task-group children never touch the `any MPViewModel` existentials and
@@ -830,7 +835,6 @@ class MBRenderer {
         )
     }
 
-    @MainActor
     private func removeInfoWindow(for model: any MPViewModel) async {
         if let infoWindow = infoWindows[model.id] {
             infoWindow.remove()
@@ -848,7 +852,6 @@ class MBRenderer {
         }
     }
 
-    @MainActor
     private func createOrUpdateInfoWindow(for model: any MPViewModel, at point: MPPoint, location: MPLocation) async {
         var yOffset = 0.0
         var xOffset = 0.0
@@ -906,7 +909,6 @@ class MBRenderer {
     /// enabling O(1) change detection without expensive PNG encoding or MD5 hashing.
     private var imagesAdded = [String: ObjectIdentifier]()
 
-    @MainActor
     private func updateImage(for model: any MPViewModel) async throws {
         guard let id = model.marker?.id else { return }
 
@@ -935,7 +937,6 @@ class MBRenderer {
         }
     }
 
-    @MainActor
     private func update2DModel(for model: any MPViewModel) async throws {
         if let model2D = model.data[.model2D] as? UIImage, let id = model.model2D?.id, is2dModelsEnabled {
             let imageIdentity = ObjectIdentifier(model2D)
@@ -947,7 +948,6 @@ class MBRenderer {
 
     var enabled = true
 
-    @MainActor
     private func updateGeoJSONSource(features: [Feature], geometryFeatures: [Feature], nonCollisionFeatures: [Feature], featuresExtrusions: [Feature], featuresWalls: [Feature], features3DModels: [Feature]) async {
         // All six GeoJSON sources must be updated atomically — no cancellation
         // checks between them. A partial update (e.g. geometry updated but walls

@@ -21,7 +21,8 @@ public class MapBoxProvider: MPMapProvider {
     public var transitionLevel = 17
 
     /// Controls visibility of Mapbox base-map POI / place / transit labels.
-    /// `nil` (default) and `true` show them; `false` hides them.
+    /// Only `true` shows them; `nil` (default) and `false` hide them.
+    /// Aligned with the Android SDK's default-hidden behavior.
     public var showMapboxMapMarkers: Bool? {
         didSet {
             guard oldValue != showMapboxMapMarkers else { return }
@@ -32,7 +33,8 @@ public class MapBoxProvider: MPMapProvider {
     }
 
     /// Controls visibility of Mapbox base-map road labels.
-    /// `nil` (default) and `true` show them; `false` hides them.
+    /// Only `true` shows them; `nil` (default) and `false` hide them.
+    /// Aligned with the Android SDK's default-hidden behavior.
     public var showMapboxRoadLabels: Bool? {
         didSet {
             guard oldValue != showMapboxRoadLabels else { return }
@@ -80,8 +82,17 @@ public class MapBoxProvider: MPMapProvider {
 
     public weak var view: UIView?
 
+    /// Mapbox's own logo is hidden in `adjustOrnaments()`; we relocate the
+    /// MapsPeople branding logo to the bottom-left to fill the role of the
+    /// map watermark, and the Mapbox attribution button shifts right of it.
+    public var mapsPeopleLogoPosition: MPMapsPeopleLogoPosition { .bottomLeft }
+
     public var padding: UIEdgeInsets = .zero {
-        didSet { adjustOrnaments() }
+        // `padding` is set from `MPMapControlInternal` on the main
+        // thread — UIKit anyway — but the setter has no isolation in
+        // its signature, so assert before hopping into the
+        // @MainActor-only `adjustOrnaments()`.
+        didSet { MainActor.assumeIsolated { adjustOrnaments() } }
     }
 
     public var mpAccessibilityElementsHidden: Bool = false
@@ -96,8 +107,18 @@ public class MapBoxProvider: MPMapProvider {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
     }
 
+    /// Invalidates the renderer's internal model cache.
+    ///
+    /// Submission is async (a `Task { @MainActor … }`), so the underlying clear
+    /// runs on a later turn of MainActor's executor. Callers that follow this
+    /// with `refresh()` (which itself wraps in a `Task { @MainActor … }`) get
+    /// invalidate-before-refresh ordering for free via FIFO scheduling on the
+    /// MainActor queue. Eventually consistent — do not assume the cache is
+    /// empty the instant this returns.
     public func invalidateRenderCache() {
-        renderer?.invalidateRenderCache()
+        Task { @MainActor [weak self] in
+            self?.renderer?.invalidateRenderCache()
+        }
     }
 
     @MainActor
@@ -153,6 +174,20 @@ public class MapBoxProvider: MPMapProvider {
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
 
         onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [weak self] _ in
+            // Re-apply ornament hiding on every style load: Mapbox's
+            // OrnamentsManager rebuilds its subviews when the style changes,
+            // which resets the logoView's isHidden flag and re-attaches it
+            // to the view hierarchy.
+            //
+            // Mapbox v11 delivers `onStyleLoaded` on the main thread in
+            // practice but the callback's signature does not enforce it,
+            // and `adjustOrnaments` touches UIKit (`logoView`,
+            // `ornaments.options`). `assumeIsolated` traps loudly if a
+            // future Mapbox version moves this off main instead of
+            // silently racing on UIKit state.
+            MainActor.assumeIsolated {
+                self?.adjustOrnaments()
+            }
             if self?.useMapsIndoorsStyle == false {
                 Task { [weak self] in
                     await self?.verifySetup()
@@ -213,7 +248,10 @@ public class MapBoxProvider: MPMapProvider {
             }
         }
 
-        adjustOrnaments()
+        // Ornament adjustment is owned by the `onStyleLoaded` observer
+        // installed in `init` — it fires for every style load, including
+        // the one we just awaited above and any later style swaps. No
+        // need to call `adjustOrnaments()` directly here.
         renderer?.cleanup()
         renderer = MBRenderer(mapView: mapView, provider: self)
         _routeRenderer = MBRouteRenderer(mapView: mapView)
@@ -234,7 +272,7 @@ public class MapBoxProvider: MPMapProvider {
             guard let self else { return }
             self._cameraDebounceTask?.cancel()
             self._cameraDebounceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms debounce
+                try? await Task.sleep(nanoseconds: 150_000_000)  // 150ms debounce
                 guard Task.isCancelled == false else { return }
                 self?.delegate?.cameraChangedPosition()
                 await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
@@ -270,10 +308,11 @@ public class MapBoxProvider: MPMapProvider {
 
         // Use a small rect around the tap point to account for icon anchor offsets and to matches Apple's minimum touch target.
         let tapTolerance: CGFloat = 22
-        let tapRect = CGRect(x: screenPoint.x - tapTolerance,
-                             y: screenPoint.y - tapTolerance,
-                             width: tapTolerance * 2,
-                             height: tapTolerance * 2)
+        let tapRect = CGRect(
+            x: screenPoint.x - tapTolerance,
+            y: screenPoint.y - tapTolerance,
+            width: tapTolerance * 2,
+            height: tapTolerance * 2)
 
         let queryOptions = RenderedQueryOptions(
             layerIds: [
@@ -317,16 +356,49 @@ public class MapBoxProvider: MPMapProvider {
         _ = delegate?.didTapInfoWindowOf(locationId: locationId)
     }
 
+    @MainActor
     private func adjustOrnaments() {
         guard let mapView else { return }
 
         let bottomPadding = padding.bottom + 5
         mapView.ornaments.options.scaleBar.visibility = .hidden
-        mapView.ornaments.options.logo.margins = CGPoint(x: 8, y: bottomPadding)
-        mapView.ornaments.options.attributionButton.position = .bottomLeft
 
-        let pos = mapView.ornaments.logoView.frame.width
-        mapView.ornaments.options.attributionButton.margins = CGPoint(x: pos + 8, y: bottomPadding)
+        // Hide the Mapbox logo (watermark).
+        //
+        // ⚠️  COMPLIANCE NOTE
+        //  The Mapbox Terms of Service ("Maps SDK Service Specific Terms")
+        //  require that the Mapbox logo and attribution remain visible on
+        //  any map rendering Mapbox tiles. Hiding the logo without an
+        //  enterprise / no-attribution rider in the consuming app's Mapbox
+        //  contract puts that app in breach of Mapbox's ToS. The Mapbox
+        //  attribution button below is intentionally left visible so the
+        //  legally required source attribution (OpenStreetMap, imagery
+        //  providers, etc.) remains accessible to end users.
+        //
+        //  Consuming apps that ship this build are responsible for confirming
+        //  they have the contractual right with Mapbox to suppress the logo.
+        //
+        //  Implementation note: Mapbox v11 marks `OrnamentOptions.logo.visibility`
+        //  as @_spi (private API). Toggling `UIView.isHidden` on the
+        //  underlying `logoView` alone is not durable — `OrnamentsManager`
+        //  rebuilds and re-lays out its subviews on style reloads and
+        //  resets the flag. Detach the view from the hierarchy and hide it
+        //  for belt-and-suspenders coverage; `adjustOrnaments()` is
+        //  re-invoked from the `onStyleLoaded` observer so a fresh
+        //  logoView produced after a style swap is also suppressed.
+        let logoView = mapView.ornaments.logoView
+        logoView.isHidden = true
+        logoView.removeFromSuperview()
+
+        // Position the attribution button at the bottom-left, offset to
+        // the right of the MapsPeople branding logo (which now occupies
+        // the watermark slot vacated by the hidden Mapbox logo). The
+        // logo width and the spacing both come from
+        // MPMapsPeopleLogoLayout so this provider and MPMapControl stay
+        // in sync via a single source of truth.
+        let attributionLeftOffset = MPMapsPeopleLogoLayout.width + MPMapsPeopleLogoLayout.trailingSpacing
+        mapView.ornaments.options.attributionButton.position = .bottomLeft
+        mapView.ornaments.options.attributionButton.margins = CGPoint(x: attributionLeftOffset, y: bottomPadding)
     }
 
     @MainActor
@@ -353,9 +425,10 @@ public class MapBoxProvider: MPMapProvider {
             return
         }
         guard let pathForResourceString = bundle.path(forResource: filenameString, ofType: nil),
-              let fontData = NSData(contentsOfFile: pathForResourceString),
-              let dataProvider = CGDataProvider(data: fontData),
-              let fontRef = CGFont(dataProvider) else { return }
+            let fontData = NSData(contentsOfFile: pathForResourceString),
+            let dataProvider = CGDataProvider(data: fontData),
+            let fontRef = CGFont(dataProvider)
+        else { return }
 
         var errorRef: Unmanaged<CFError>? = nil
         if CTFontManagerRegisterGraphicsFont(fontRef, &errorRef) == false {

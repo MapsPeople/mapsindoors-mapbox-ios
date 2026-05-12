@@ -34,45 +34,68 @@ class MBPositionPresenter: MPPositionPresenter {
 
         DispatchQueue.main.async { [weak self] in
             guard let self, let map = self.map, map.isStyleLoaded else { return }
-            addSourcesAndLayersIfNotPresent()
-            do {
-                try map.moveLayer(withId: layerBlueDotCircle, to: .above(Constants.LayerIDs.tileLayer))
-                try map.moveLayer(withId: layerBlueDotMarker, to: .above(layerBlueDotCircle))
+            applyBlueDotUpdate(
+                map: map,
+                position: position,
+                markerIcon: markerIcon,
+                markerOpacity: markerOpacity,
+                markerBearing: markerBearing,
+                circleRadiusMeters: circleRadiusMeters,
+                circleFillColor: circleFillColor,
+                circleStrokeColor: circleStrokeColor,
+                circleStrokeWidth: circleStrokeWidth)
+        }
+    }
 
-                try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
-                    circleLayer.visibility = .constant(.visible)
-                    circleLayer.circleColor = .constant(StyleColor(circleFillColor))
-                    circleLayer.circleOpacity = .constant(1 - circleFillColor.cgColor.alpha)
-                    circleLayer.circleStrokeColor = .constant(StyleColor(circleStrokeColor))
-                    circleLayer.circleStrokeOpacity = .constant(1 - circleStrokeColor.cgColor.alpha)
-                    circleLayer.circleStrokeWidth = .constant(circleStrokeWidth)
-                    circleLayer.slot = "top"
-                    circleLayer.circleEmissiveStrength = .constant(1.0)
-                }
+    private func applyBlueDotUpdate(
+        map: MapboxMap,
+        position: CLLocationCoordinate2D,
+        markerIcon: UIImage,
+        markerOpacity: Double,
+        markerBearing: Double,
+        circleRadiusMeters: Double,
+        circleFillColor: UIColor,
+        circleStrokeColor: UIColor,
+        circleStrokeWidth: Double
+    ) {
+        addSourcesAndLayersIfNotPresent()
+        do {
+            try map.moveLayer(withId: layerBlueDotCircle, to: .above(Constants.LayerIDs.tileLayer))
+            try map.moveLayer(withId: layerBlueDotMarker, to: .above(layerBlueDotCircle))
 
-                try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
-                    markerLayer.visibility = .constant(.visible)
-                    markerLayer.iconOpacity = .constant(markerOpacity)
-                    markerLayer.iconRotate = .constant(markerBearing)
-                    markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { self.blueDotIconId } })
-                    markerLayer.iconRotationAlignment = .constant(.map)
-                    markerLayer.iconPitchAlignment = .constant(.map)
-                    markerLayer.iconAllowOverlap = .constant(true)
-                    markerLayer.textAllowOverlap = .constant(true)
-                    markerLayer.slot = "top"
-                }
-
-                let circleSize = circleRadiusMeters / (cos(position.latitude * (.pi / 180)) * 0.019)
-                var bluedotFeature = Feature(geometry: .point(Point(position)))
-                bluedotFeature.properties = [blueDotCircleSizeId: .number(circleSize)]
-
-                map.updateGeoJSONSource(withId: srcBlueDotMarker, geoJSON: GeoJSONObject.feature(bluedotFeature))
-                map.updateGeoJSONSource(withId: srcBlueDotCircle, geoJSON: GeoJSONObject.feature(bluedotFeature))
-
-                try map.addImage(markerIcon, id: blueDotIconId, sdf: false)
-            } catch {
-                MPLog.mapbox.error("Error attempting to update blue dot layers: " + error.localizedDescription)
+            try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
+                circleLayer.visibility = .constant(.visible)
+                circleLayer.circleColor = .constant(StyleColor(circleFillColor))
+                circleLayer.circleOpacity = .constant(1 - circleFillColor.cgColor.alpha)
+                circleLayer.circleStrokeColor = .constant(StyleColor(circleStrokeColor))
+                circleLayer.circleStrokeOpacity = .constant(1 - circleStrokeColor.cgColor.alpha)
+                circleLayer.circleStrokeWidth = .constant(circleStrokeWidth)
+                circleLayer.slot = "top"
+                circleLayer.circleEmissiveStrength = .constant(1.0)
             }
+
+            try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
+                markerLayer.visibility = .constant(.visible)
+                markerLayer.iconOpacity = .constant(markerOpacity)
+                markerLayer.iconRotate = .constant(markerBearing)
+                markerLayer.iconImage = .expression(Exp(.image) { Exp(.literal) { blueDotIconId } })
+                markerLayer.iconRotationAlignment = .constant(.map)
+                markerLayer.iconPitchAlignment = .constant(.map)
+                markerLayer.iconAllowOverlap = .constant(true)
+                markerLayer.textAllowOverlap = .constant(true)
+                markerLayer.slot = "top"
+            }
+
+            let circleSize = circleRadiusMeters / (cos(position.latitude * (.pi / 180)) * 0.019)
+            var bluedotFeature = Feature(geometry: .point(Point(position)))
+            bluedotFeature.properties = [blueDotCircleSizeId: .number(circleSize)]
+
+            map.updateGeoJSONSource(withId: srcBlueDotMarker, geoJSON: GeoJSONObject.feature(bluedotFeature))
+            map.updateGeoJSONSource(withId: srcBlueDotCircle, geoJSON: GeoJSONObject.feature(bluedotFeature))
+
+            try map.addImage(markerIcon, id: blueDotIconId, sdf: false)
+        } catch {
+            MPLog.mapbox.error("Error attempting to update blue dot layers: " + error.localizedDescription)
         }
     }
 

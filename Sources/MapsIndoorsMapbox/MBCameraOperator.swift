@@ -2,24 +2,24 @@ import Foundation
 import MapboxMaps
 import MapsIndoorsCore
 
+@MainActor
 class MBCameraOperator: MPCameraOperator {
     weak var map: MapboxMap?
     weak var view: MapView?
     weak var mapProvider: MPMapProvider?
 
-    required init(mapView: MapView, provider: MPMapProvider) {
+    nonisolated required init(mapView: MapView, provider: MPMapProvider) {
         map = mapView.mapboxMap
         view = mapView
         mapProvider = provider
     }
 
-    init() {}
+    nonisolated init() {}
 
     func move(target: CLLocationCoordinate2D, zoom: Float) {
         view?.mapboxMap.setCamera(to: CameraOptions(center: target, zoom: CGFloat(zoom)))
     }
 
-    @MainActor
     func animate(pos: MPCameraPosition) async {
         let newCamera = CameraOptions(
             center: CLLocationCoordinate2D(latitude: pos.target.latitude, longitude: pos.target.longitude),
@@ -33,7 +33,6 @@ class MBCameraOperator: MPCameraOperator {
         }
     }
 
-    @MainActor
     func animate(bounds: MPGeoBounds) async {
         do {
             if let newCamera = try view?.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(), coordinatesPadding: mapProvider?.padding, maxZoom: nil, offset: nil) {
@@ -48,7 +47,6 @@ class MBCameraOperator: MPCameraOperator {
         }
     }
 
-    @MainActor
     func animate(target: CLLocationCoordinate2D, zoom: Float?) async {
         let curZoom: Float? =
             if let z = self.view?.mapboxMap.cameraState.zoom {
@@ -75,7 +73,6 @@ class MBCameraOperator: MPCameraOperator {
     }
 
     var projection: MPProjection {
-        @MainActor
         get async {
             MBProjectionModel(view: view)
         }

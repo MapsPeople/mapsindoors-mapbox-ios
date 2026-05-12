@@ -15,8 +15,8 @@ struct MBProviderLogIdentity: MPMapProviderLogIdentity {
         // host app's version instead of Mapbox's — guard against that.
         let bundle = Bundle(for: MapView.self)
         guard bundle != Bundle.main,
-              let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
-              !version.isEmpty
+            let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
+            !version.isEmpty
         else { return "unknown" }
         return version
     }()
