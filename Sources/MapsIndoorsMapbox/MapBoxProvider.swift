@@ -8,7 +8,11 @@ public class MapBoxProvider: MPMapProvider {
 
     public var enableNativeMapBuildings: Bool = true {
         didSet {
-            mapboxTransitionHandler?.enableMapboxBuildings = enableNativeMapBuildings
+            guard oldValue != enableNativeMapBuildings else { return }
+            let value = enableNativeMapBuildings
+            Task { @MainActor [weak self] in
+                self?.mapboxTransitionHandler?.enableMapboxBuildings = value
+            }
         }
     }
 
@@ -27,7 +31,7 @@ public class MapBoxProvider: MPMapProvider {
         didSet {
             guard oldValue != showMapboxMapMarkers else { return }
             Task { @MainActor [weak self] in
-                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
+                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
             }
         }
     }
@@ -39,7 +43,7 @@ public class MapBoxProvider: MPMapProvider {
         didSet {
             guard oldValue != showMapboxRoadLabels else { return }
             Task { @MainActor [weak self] in
-                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
+                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
             }
         }
     }
@@ -195,6 +199,16 @@ public class MapBoxProvider: MPMapProvider {
             }
         }
 
+        // The default Mapbox style begins loading during `MapView.init`,
+        // so by the time our observer above subscribes, the initial
+        // `onStyleLoaded` event may have already fired — `Signal.observe`
+        // does not replay past events. Apply once synchronously so the
+        // Mapbox logo is suppressed even when no further style load is
+        // scheduled (SPEX-1786).
+        MainActor.assumeIsolated {
+            adjustOrnaments()
+        }
+
         Task { [weak self] in
             await self?.verifySetup()
         }
@@ -248,10 +262,13 @@ public class MapBoxProvider: MPMapProvider {
             }
         }
 
-        // Ornament adjustment is owned by the `onStyleLoaded` observer
-        // installed in `init` — it fires for every style load, including
-        // the one we just awaited above and any later style swaps. No
-        // need to call `adjustOrnaments()` directly here.
+        // Re-assert ornament adjustments after every load. The
+        // `onStyleLoaded` observer also fires for the load awaited
+        // above, but offline / `useMapsIndoorsStyle == false` paths
+        // skip `loadStyle()` entirely — leaving the Mapbox logo
+        // visible from the default style if we only relied on the
+        // observer (SPEX-1786).
+        adjustOrnaments()
         renderer?.cleanup()
         renderer = MBRenderer(mapView: mapView, provider: self)
         _routeRenderer = MBRouteRenderer(mapView: mapView)
@@ -275,7 +292,7 @@ public class MapBoxProvider: MPMapProvider {
                 try? await Task.sleep(nanoseconds: 150_000_000)  // 150ms debounce
                 guard Task.isCancelled == false else { return }
                 self?.delegate?.cameraChangedPosition()
-                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
+                await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
             }
         }
         cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { [weak self] _ in
@@ -298,7 +315,7 @@ public class MapBoxProvider: MPMapProvider {
             await setTileProvider(tileProvider: tileProvider)
         }
 
-        await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisiblity()
+        await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
 
         await setViewModels(models: [], forceClear: true)
     }
@@ -363,29 +380,13 @@ public class MapBoxProvider: MPMapProvider {
         let bottomPadding = padding.bottom + 5
         mapView.ornaments.options.scaleBar.visibility = .hidden
 
-        // Hide the Mapbox logo (watermark).
-        //
-        // ⚠️  COMPLIANCE NOTE
-        //  The Mapbox Terms of Service ("Maps SDK Service Specific Terms")
-        //  require that the Mapbox logo and attribution remain visible on
-        //  any map rendering Mapbox tiles. Hiding the logo without an
-        //  enterprise / no-attribution rider in the consuming app's Mapbox
-        //  contract puts that app in breach of Mapbox's ToS. The Mapbox
-        //  attribution button below is intentionally left visible so the
-        //  legally required source attribution (OpenStreetMap, imagery
-        //  providers, etc.) remains accessible to end users.
-        //
-        //  Consuming apps that ship this build are responsible for confirming
-        //  they have the contractual right with Mapbox to suppress the logo.
-        //
-        //  Implementation note: Mapbox v11 marks `OrnamentOptions.logo.visibility`
-        //  as @_spi (private API). Toggling `UIView.isHidden` on the
-        //  underlying `logoView` alone is not durable — `OrnamentsManager`
-        //  rebuilds and re-lays out its subviews on style reloads and
-        //  resets the flag. Detach the view from the hierarchy and hide it
-        //  for belt-and-suspenders coverage; `adjustOrnaments()` is
-        //  re-invoked from the `onStyleLoaded` observer so a fresh
-        //  logoView produced after a style swap is also suppressed.
+        // Mapbox v11 marks `OrnamentOptions.logo.visibility` as @_spi (private API).
+        // Toggling `UIView.isHidden` on the underlying `logoView` alone is not
+        // durable — `OrnamentsManager` rebuilds and re-lays out its subviews on
+        // style reloads and resets the flag. Detach the view from the hierarchy
+        // and hide it for belt-and-suspenders coverage; `adjustOrnaments()` is
+        // re-invoked from the `onStyleLoaded` observer so a fresh logoView
+        // produced after a style swap is also suppressed.
         let logoView = mapView.ornaments.logoView
         logoView.isHidden = true
         logoView.removeFromSuperview()

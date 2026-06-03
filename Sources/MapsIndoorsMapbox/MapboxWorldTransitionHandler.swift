@@ -11,6 +11,7 @@ protocol MBStyleImportConfigSetting: AnyObject {
 
 extension MapboxMap: MBStyleImportConfigSetting {}
 
+@MainActor
 class MapboxWorldTransitionHandler {
     private let baseMap = "basemap"
     private let placeLabels = "showPlaceLabels"
@@ -26,12 +27,12 @@ class MapboxWorldTransitionHandler {
             lastAppliedWorldState = nil
             lastAppliedMarkerConfig = nil
             Task { [weak self] in
-                await self?.configureMapsIndoorsVsMapboxVisiblity()
+                await self?.configureMapsIndoorsVsMapboxVisibility()
             }
         }
     }
 
-    required init(mapProvider: MapBoxProvider) {
+    nonisolated required init(mapProvider: MapBoxProvider) {
         map = mapProvider
     }
 
@@ -52,8 +53,7 @@ class MapboxWorldTransitionHandler {
 
     /// Overridable so tests can subclass via `@testable import` and count invocations
     /// scheduled by `MapBoxProvider` property didSet observers.
-    @MainActor
-    func configureMapsIndoorsVsMapboxVisiblity() async {
+    func configureMapsIndoorsVsMapboxVisibility() async {
         guard let map, let activeMapboxMap else { return }
 
         do {
