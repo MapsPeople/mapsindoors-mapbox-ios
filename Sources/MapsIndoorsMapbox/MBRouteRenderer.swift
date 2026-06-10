@@ -249,7 +249,24 @@ class MBRouteRenderer: MPRouteRenderer {
 
         if !bearing.isNaN {
             do {
-                let camOptions = try mapView.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(bearing: bearing, pitch: pitch), coordinatesPadding: padding, maxZoom: nil, offset: nil)
+                var camOptions = try mapView.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(bearing: bearing, pitch: pitch), coordinatesPadding: padding, maxZoom: nil, offset: nil)
+                // `coordinatesPadding` only feeds the center/zoom
+                // computation — per Mapbox v11 docs it is *not*
+                // applied to the map, and the returned CameraOptions
+                // has `padding == nil`. Without an explicit padding
+                // here, fly(to:) would leave the map's existing
+                // padding intact (e.g. `mapProvider.padding` that
+                // MBCameraOperator's earlier move/animate calls have
+                // persisted on the camera state), so the route would
+                // be fit for (view - combinedPadding) but rendered
+                // against (view - mapPadding) — a mismatch that
+                // leaves an extra safe-area + renderer-padding margin
+                // around the route. Also fixes the tilted-fit-mode
+                // case where perspective stretches the near end
+                // outside the visible region. Setting padding here
+                // is a no-op when pitch is 0 and the existing camera
+                // padding already equals `padding`.
+                camOptions.padding = padding
                 mapView.camera.fly(to: camOptions, duration: Double(durationMs) / 5000.0, completion: nil)
             } catch {
                 MPLog.mapbox.error("Error trying to move Mapbox camera!")

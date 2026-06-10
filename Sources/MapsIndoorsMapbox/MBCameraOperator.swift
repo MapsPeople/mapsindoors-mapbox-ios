@@ -17,12 +17,16 @@ class MBCameraOperator: MPCameraOperator {
     nonisolated init() {}
 
     func move(target: CLLocationCoordinate2D, zoom: Float) {
-        view?.mapboxMap.setCamera(to: CameraOptions(center: target, zoom: CGFloat(zoom)))
+        view?.mapboxMap.setCamera(to: CameraOptions(
+            center: target,
+            padding: mapProvider?.padding,
+            zoom: CGFloat(zoom)))
     }
 
     func animate(pos: MPCameraPosition) async {
         let newCamera = CameraOptions(
             center: CLLocationCoordinate2D(latitude: pos.target.latitude, longitude: pos.target.longitude),
+            padding: mapProvider?.padding,
             zoom: CGFloat(pos.zoom),
             bearing: pos.bearing,
             pitch: pos.viewingAngle)
@@ -57,6 +61,7 @@ class MBCameraOperator: MPCameraOperator {
         if let zoom = zoom ?? curZoom {
             let newCamera = CameraOptions(
                 center: target,
+                padding: mapProvider?.padding,
                 zoom: CGFloat(zoom))
             await withCheckedContinuation { continuation in
                 self.view?.camera.ease(to: newCamera, duration: 0.3) { _ in

@@ -172,7 +172,6 @@ public class MapBoxProvider: MPMapProvider {
         self.mapView = mapView
         view = mapView
         self.accessToken = accessToken
-        MPLogger.sharedInstance.setMapProviderLogIdentity(MBProviderLogIdentity())
         positionPresenter = MBPositionPresenter(map: self.mapView?.mapboxMap)
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
@@ -322,14 +321,7 @@ public class MapBoxProvider: MPMapProvider {
 
     @objc func onMapClick(_ sender: UITapGestureRecognizer) {
         let screenPoint = sender.location(in: mapView)
-
-        // Use a small rect around the tap point to account for icon anchor offsets and to matches Apple's minimum touch target.
-        let tapTolerance: CGFloat = 22
-        let tapRect = CGRect(
-            x: screenPoint.x - tapTolerance,
-            y: screenPoint.y - tapTolerance,
-            width: tapTolerance * 2,
-            height: tapTolerance * 2)
+        guard let mapboxMap = mapView?.mapboxMap else { return }
 
         let queryOptions = RenderedQueryOptions(
             layerIds: [
@@ -344,28 +336,115 @@ public class MapBoxProvider: MPMapProvider {
                 Constants.LayerIDs.featureExtrusionLayer,
             ], filter: nil)
 
-        mapView?.mapboxMap.queryRenderedFeatures(with: tapRect, options: queryOptions) { result in
-            if case .success(let queriedFeatures) = result {
-                for result in queriedFeatures {
-                    if result.queriedFeature.feature.properties?["clickable"] == JSONValue(booleanLiteral: false) {
-                        continue
-                    }
+        // Tolerance rect: catches bottom-anchored / small icons whose visual
+        // offset leaves nothing exactly under the finger (the SPEX-1611
+        // "markers sometimes not clickable" fix). 22pt ≈ Apple's 44pt target.
+        let tapTolerance: CGFloat = 22
+        let tapRect = CGRect(
+            x: screenPoint.x - tapTolerance,
+            y: screenPoint.y - tapTolerance,
+            width: tapTolerance * 2,
+            height: tapTolerance * 2)
 
-                    guard let id = result.queriedFeature.feature.identifier, case .string(let idString) = id else { continue }
+        let coordinateFallback: () -> Void = { [weak self] in
+            guard let self, let coordinate = self.mapView?.mapboxMap.coordinate(for: screenPoint) else { return }
+            self.delegate?.didTap(coordinate: coordinate)
+        }
 
-                    if idString == "end_marker" || idString == "start_marker" || idString.starts(with: "stop") {
-                        self.routeRenderer.routeMarkerDelegate?.onRouteMarkerClicked(tag: idString)
-                        return
-                    } else {
-                        _ = self.delegate?.didTap(locationId: String(idString), type: result.queriedFeature.mpRenderedFeatureType)
-                        return
-                    }
-                }
+        // Pass 1: exact hit under the finger (zero-tolerance point query). When
+        // the tap lands directly on a room/marker, that feature must win — the
+        // wide tolerance rect (pass 2) can cover several neighbouring rooms when
+        // zoomed out, and the query result is not ordered by distance, so falling
+        // straight to it would select an arbitrary neighbour (SPEX-1903).
+        mapboxMap.queryRenderedFeatures(with: screenPoint, options: queryOptions) { [weak self] pointResult in
+            guard let self else { return }
+            if case .success(let features) = pointResult, self.dispatchTap(features, screenPoint: screenPoint, map: mapboxMap) { return }
+
+            // Pass 2: widen to the tolerance rect (preserves the SPEX-1611 fix).
+            mapboxMap.queryRenderedFeatures(with: tapRect, options: queryOptions) { [weak self] rectResult in
+                guard let self else { return }
+                if case .success(let features) = rectResult, self.dispatchTap(features, screenPoint: screenPoint, map: mapboxMap) { return }
+                coordinateFallback()
             }
+        }
+    }
 
-            if let coordinate = self.mapView?.mapboxMap.coordinate(for: screenPoint) {
-                self.delegate?.didTap(coordinate: coordinate)
-            }
+    /// A tap candidate reduced to the only fields the selection ranking needs.
+    /// Decoupling the ranking from Mapbox's `QueriedRenderedFeature` (which has
+    /// no public initializer) keeps `selectedCandidateIndex` unit-testable — see
+    /// `MapBoxProviderTapSelectionTests`.
+    struct TapCandidate {
+        let id: String?
+        let isMarker: Bool
+        let clickable: Bool
+        let screenDistance: CGFloat
+    }
+
+    /// Index of the candidate a tap should select: among clickable, identified
+    /// candidates, the nearest marker — the icon the user aims at — otherwise
+    /// the nearest candidate of any kind. `nil` if none qualify.
+    ///
+    /// `queryRenderedFeatures` returns features in render (paint) order, NOT by
+    /// distance from the tap. Dispatching the first clickable hit therefore
+    /// selected an arbitrary neighbouring room when several fell inside the
+    /// tolerance rect (zoomed out / pitched) — SPEX-1903. Ranking by screen
+    /// distance makes the room actually under the finger win.
+    static func selectedCandidateIndex(_ candidates: [TapCandidate]) -> Int? {
+        let eligible = candidates.indices.filter { candidates[$0].clickable && candidates[$0].id != nil }
+        let markers = eligible.filter { candidates[$0].isMarker }
+        let pool = markers.isEmpty ? eligible : markers
+        return pool.min { candidates[$0].screenDistance < candidates[$1].screenDistance }
+    }
+
+    /// Forwards the clickable feature nearest the tap to the appropriate delegate
+    /// (route marker vs. location). Returns `true` if a feature was dispatched,
+    /// so the caller can stop before widening the query / falling back to a bare
+    /// coordinate tap. Ranking lives in `selectedCandidateIndex`.
+    private func dispatchTap(_ features: [QueriedRenderedFeature], screenPoint: CGPoint, map: MapboxMap) -> Bool {
+        let candidates = features.map { result -> TapCandidate in
+            let id: String? = {
+                if case .string(let string)? = result.queriedFeature.feature.identifier { return string }
+                return nil
+            }()
+            return TapCandidate(
+                id: id,
+                isMarker: result.queriedFeature.mpRenderedFeatureType == .marker,
+                clickable: result.queriedFeature.feature.properties?["clickable"] != JSONValue(booleanLiteral: false),
+                screenDistance: screenDistance(of: result.queriedFeature.feature, to: screenPoint, map: map))
+        }
+
+        guard let index = Self.selectedCandidateIndex(candidates) else { return false }
+        let result = features[index]
+        guard case .string(let idString)? = result.queriedFeature.feature.identifier else { return false }
+
+        if idString == "end_marker" || idString == "start_marker" || idString.starts(with: "stop") {
+            routeRenderer.routeMarkerDelegate?.onRouteMarkerClicked(tag: idString)
+        } else {
+            _ = delegate?.didTap(locationId: String(idString), type: result.queriedFeature.mpRenderedFeatureType)
+        }
+        return true
+    }
+
+    /// Screen-space distance (points) from `screenPoint` to the nearest vertex
+    /// of `feature`'s geometry. Used to rank tap candidates by proximity.
+    private func screenDistance(of feature: Feature, to screenPoint: CGPoint, map: MapboxMap) -> CGFloat {
+        func distance(to coordinate: CLLocationCoordinate2D) -> CGFloat {
+            let point = map.point(for: coordinate)
+            let dx = point.x - screenPoint.x
+            let dy = point.y - screenPoint.y
+            return (dx * dx + dy * dy).squareRoot()
+        }
+        switch feature.geometry {
+        case .point(let point):
+            return distance(to: point.coordinates)
+        case .polygon(let polygon):
+            return polygon.coordinates.flatMap { $0 }.map(distance).min() ?? .greatestFiniteMagnitude
+        case .multiPolygon(let multiPolygon):
+            return multiPolygon.coordinates.flatMap { $0 }.flatMap { $0 }.map(distance).min() ?? .greatestFiniteMagnitude
+        case .lineString(let lineString):
+            return lineString.coordinates.map(distance).min() ?? .greatestFiniteMagnitude
+        default:
+            return .greatestFiniteMagnitude
         }
     }
 
