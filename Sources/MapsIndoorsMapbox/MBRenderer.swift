@@ -1007,7 +1007,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var polygonFeature: Feature? {
+    var polygonFeature: Feature? {
         guard let polygon else { return nil }
 
         var feature = Feature(geometry: polygon.geometry.featureGeometry())
@@ -1019,6 +1019,10 @@ extension MPViewModel {
         if let polygonStrokeColor = polygon.properties[.polygonStrokeColor] as? String { feature.properties?[Key.polygonStrokeColor.rawValue] = JSONValue(polygonStrokeColor) }
         if let polygonStrokeOpacity = polygon.properties[.polygonStrokeOpacity] as? Double { feature.properties?[Key.polygonStrokeOpacity.rawValue] = JSONValue(polygonStrokeOpacity) }
         if let polygonStrokeWidth = polygon.properties[.polygonStrokeWidth] as? Double { feature.properties?[Key.polygonStrokeWidth.rawValue] = JSONValue(polygonStrokeWidth) }
+        // The polygon fill layer uses polygonArea as fillSortKey for z-ordering.
+        // Dropped from the perf refactor (bfce0dff7) → smaller rooms could render
+        // behind larger building outlines because every polygon got the same null sort key.
+        if let polygonArea = polygon.properties[.polygonArea] as? Double { feature.properties?[Key.polygonArea.rawValue] = JSONValue(polygonArea) }
         if let polygonType = (polygon.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(polygonType) }
         if let clickable = polygon.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
@@ -1042,10 +1046,20 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var model2DFeature: Feature? {
+    var model2DFeature: Feature? {
         guard let model2D else { return nil }
 
-        var feature = Feature(geometry: nil)
+        // SymbolLayer renders the icon-image at the feature's Point geometry.
+        // For a 2D model the producer always emits an MPPoint, so this guard
+        // should never trip — `featureGeometry()` only returns nil for
+        // unrecognised coordinate types. We bail rather than emitting a
+        // geometry-less Feature, which would silently re-introduce the
+        // invisible-symbol bug from bfce0dff7.
+        guard let geometry = model2D.geometry.featureGeometry() else {
+            assertionFailure("2D model feature has unrecognised geometry coordinate type — symbol will not be rendered")
+            return nil
+        }
+        var feature = Feature(geometry: geometry)
 
         feature.identifier = .string(id)
         feature.properties = JSONObject()
@@ -1059,7 +1073,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var model2DGeometryFeature: Feature? {
+    var model2DGeometryFeature: Feature? {
         guard let center = ((model2D?.geometry as? MPViewModelFeatureGeometry)?.coordinates as? MPPoint)?.coordinate,
             let bearing = model2D?.properties[.model2dBearing] as? Double,
             let width = model2D?.properties[.model2DWidth] as? Double,
