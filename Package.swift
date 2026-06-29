@@ -3,11 +3,11 @@
 
 import PackageDescription
 
-let mapsindoorsVersion = Version("4.17.3")
+let mapsindoorsVersion = Version("4.18.0-rc.1")
 
 let package = Package(
     name: "MapsIndoorsMapbox",
-    platforms: [.iOS(.v15)],
+    platforms: [.iOS(.v16)],
     products: [
         .library(
             name: "MapsIndoorsMapbox",

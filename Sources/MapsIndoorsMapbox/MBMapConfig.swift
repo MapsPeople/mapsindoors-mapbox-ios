@@ -29,4 +29,12 @@ import MapsIndoors
     public func useMapsIndoorsStyle(value: Bool) {
         (mapProvider as? MapBoxProvider)?.useMapsIndoorsStyle = value
     }
+
+    /// Set whether to hide the Mapbox logo. Default is `false` (the Mapbox logo is shown),
+    /// matching the Android SDK's `hideMapboxLogo` option. When set to `true`, the Mapbox
+    /// logo is suppressed and the MapsPeople branding logo occupies the bottom-left
+    /// watermark slot. The map provider attribution remains visible in either case.
+    public func setHideMapboxLogo(hide: Bool) {
+        (mapProvider as? MapBoxProvider)?.hideMapboxLogo = hide
+    }
 }

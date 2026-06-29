@@ -48,6 +48,19 @@ public class MapBoxProvider: MPMapProvider {
         }
     }
 
+    /// Controls visibility of the Mapbox logo (watermark).
+    /// `false` (the default, matching the Android SDK's `hideMapboxLogo`
+    /// builder option) shows the Mapbox logo in its default slot; `true`
+    /// suppresses it and lets the MapsPeople branding logo take over the
+    /// bottom-left watermark slot. Re-applies on the main actor because
+    /// `adjustOrnaments()` touches UIKit ornament views.
+    public var hideMapboxLogo: Bool = false {
+        didSet {
+            guard oldValue != hideMapboxLogo else { return }
+            MainActor.assumeIsolated { adjustOrnaments() }
+        }
+    }
+
     public var wallExtrusionOpacity: Double = 0
 
     public var featureExtrusionOpacity: Double = 0
@@ -86,10 +99,12 @@ public class MapBoxProvider: MPMapProvider {
 
     public weak var view: UIView?
 
-    /// Mapbox's own logo is hidden in `adjustOrnaments()`; we relocate the
-    /// MapsPeople branding logo to the bottom-left to fill the role of the
-    /// map watermark, and the Mapbox attribution button shifts right of it.
-    public var mapsPeopleLogoPosition: MPMapsPeopleLogoPosition { .bottomLeft }
+    /// Where the MapsPeople branding logo is anchored. When the Mapbox logo
+    /// is hidden (`hideMapboxLogo == true`), the MapsPeople logo takes over
+    /// the vacated bottom-left watermark slot and the attribution button
+    /// shifts right of it. When the Mapbox logo is shown, the MapsPeople
+    /// logo moves to the bottom-right so the two logos don't collide.
+    public var mapsPeopleLogoPosition: MPMapsPeopleLogoPosition { hideMapboxLogo ? .bottomLeft : .bottomRight }
 
     public var padding: UIEdgeInsets = .zero {
         // `padding` is set from `MPMapControlInternal` on the main
@@ -459,26 +474,44 @@ public class MapBoxProvider: MPMapProvider {
         let bottomPadding = padding.bottom + 5
         mapView.ornaments.options.scaleBar.visibility = .hidden
 
-        // Mapbox v11 marks `OrnamentOptions.logo.visibility` as @_spi (private API).
-        // Toggling `UIView.isHidden` on the underlying `logoView` alone is not
-        // durable — `OrnamentsManager` rebuilds and re-lays out its subviews on
-        // style reloads and resets the flag. Detach the view from the hierarchy
-        // and hide it for belt-and-suspenders coverage; `adjustOrnaments()` is
-        // re-invoked from the `onStyleLoaded` observer so a fresh logoView
-        // produced after a style swap is also suppressed.
         let logoView = mapView.ornaments.logoView
-        logoView.isHidden = true
-        logoView.removeFromSuperview()
+        let attributionButton = mapView.ornaments.attributionButton
 
-        // Position the attribution button at the bottom-left, offset to
-        // the right of the MapsPeople branding logo (which now occupies
-        // the watermark slot vacated by the hidden Mapbox logo). The
-        // logo width and the spacing both come from
-        // MPMapsPeopleLogoLayout so this provider and MPMapControl stay
-        // in sync via a single source of truth.
-        let attributionLeftOffset = MPMapsPeopleLogoLayout.width + MPMapsPeopleLogoLayout.trailingSpacing
-        mapView.ornaments.options.attributionButton.position = .bottomLeft
-        mapView.ornaments.options.attributionButton.margins = CGPoint(x: attributionLeftOffset, y: bottomPadding)
+        if hideMapboxLogo {
+            // Hide the Mapbox logo AND its attribution "i" button together; the
+            // MapsPeople logo then takes over the bottom-left slot (see
+            // `mapsPeopleLogoPosition`). This matches the JS SDK's
+            // `hideProviderLogo` and the Android adapter. Consuming apps are
+            // responsible for confirming they hold the contractual right with
+            // Mapbox to suppress the logo/attribution.
+            //
+            // Hide via `isHidden` only (no `removeFromSuperview()`): detaching the
+            // views drops the Auto Layout constraints `OrnamentsManager` created
+            // for them, so they can't be cleanly restored if the flag is later
+            // toggled back to shown. Durability across style reloads is instead
+            // guaranteed by `adjustOrnaments()` being re-invoked on every path
+            // that can surface the ornaments — init, the `onStyleLoaded` observer,
+            // and padding changes (see SPEX-1786) — which re-hides the fresh views
+            // Mapbox rebuilds.
+            logoView.isHidden = true
+            attributionButton.isHidden = true
+        } else {
+            // Both shown: keep the Mapbox logo and its attribution "i" button
+            // together on the bottom-left (the "i" is Mapbox's own attribution
+            // control, so it belongs with the Mapbox logo). They share the same
+            // left margin; Mapbox's `OrnamentsManager` lays the attribution out
+            // relative to the logo on that corner. The MapsPeople logo is
+            // anchored bottom-right (see `mapsPeopleLogoPosition`).
+            logoView.isHidden = false
+            attributionButton.isHidden = false
+
+            let logoLeftMargin = mapView.ornaments.options.logo.margins.x
+            mapView.ornaments.options.logo.position = .bottomLeft
+            mapView.ornaments.options.logo.margins = CGPoint(x: logoLeftMargin, y: bottomPadding)
+
+            mapView.ornaments.options.attributionButton.position = .bottomLeft
+            mapView.ornaments.options.attributionButton.margins = CGPoint(x: logoLeftMargin, y: bottomPadding)
+        }
     }
 
     @MainActor

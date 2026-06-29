@@ -8,12 +8,34 @@ private class InfoWindowTapRecognizer: UITapGestureRecognizer {
     var modelId = String()
 }
 
+/// The subset of `MapboxMap`'s style-image API the renderer needs, abstracted so
+/// tests can inject a stand-in that throws on demand. `MapboxMap` satisfies it by
+/// forwarding to its own `addImage`.
+protocol MBStyleImaging: AnyObject {
+    func registerImage(_ image: UIImage, id: String) throws
+    func registerImage(_ image: UIImage, id: String, stretchX: [ImageStretches], stretchY: [ImageStretches], content: ImageContent) throws
+}
+
+extension MapboxMap: MBStyleImaging {
+    func registerImage(_ image: UIImage, id: String) throws {
+        try addImage(image, id: id)
+    }
+
+    func registerImage(_ image: UIImage, id: String, stretchX: [ImageStretches], stretchY: [ImageStretches], content: ImageContent) throws {
+        try addImage(image, id: id, stretchX: stretchX, stretchY: stretchY, content: content)
+    }
+}
+
 @MainActor
 class MBRenderer {
     /// The scale of an object relative to being zoomed out to zoom level 1 (from zoom level 22) 1/(2^22)
     static let zoom22Scale: Double = 1 / pow(2, 22)
 
     private weak var map: MapboxMap?
+
+    /// Style image registry used by the image-registration path. Defaults to `map`;
+    /// injectable so tests can drive a stand-in that fails on a chosen image.
+    weak var styleImaging: MBStyleImaging?
     private var _geoJsonSource: GeoJSONSource?
     private var _geometryGeoJsonSource: GeoJSONSource?
     private var _geoJsonSourceNoCollision: GeoJSONSource?
@@ -33,8 +55,9 @@ class MBRenderer {
 
     private var onImageUnusedCancelable: Cancelable?
 
-    init(mapView: MapView?, provider: MapBoxProvider) {
+    init(mapView: MapView?, provider: MapBoxProvider?) {
         map = mapView?.mapboxMap
+        styleImaging = map
         self.provider = provider
         self.mapView = mapView
 
@@ -707,9 +730,9 @@ class MBRenderer {
             let cached = lock.locked { self.modelCache[input.cacheKey] }
             if cached != nil { continue }
             try Task.checkCancellation()
-            try await updateImage(for: model)
+            await updateImage(for: model)
             try Task.checkCancellation()
-            try await update2DModel(for: model)
+            await update2DModel(for: model)
         }
 
         try Task.checkCancellation()
@@ -909,14 +932,26 @@ class MBRenderer {
     /// enabling O(1) change detection without expensive PNG encoding or MD5 hashing.
     private var imagesAdded = [String: ObjectIdentifier]()
 
-    private func updateImage(for model: any MPViewModel) async throws {
+    private func updateImage(for model: any MPViewModel) async {
         guard let id = model.marker?.id else { return }
 
         if let icon = model.data[.icon] as? UIImage, model.marker?.properties[.hasImage] as? Bool == true {
             let imageIdentity = ObjectIdentifier(icon)
             guard imagesAdded[id] != imageIdentity else { return }
-            try map?.addImage(icon, id: id)
-            imagesAdded[id] = imageIdentity
+            // Never let one bad image abort the render (see update2DModel).
+            do {
+                try styleImaging?.registerImage(icon, id: id)
+                imagesAdded[id] = imageIdentity
+            } catch let error as StyleError {
+                // Mapbox rejected the asset itself (e.g. "Raster image reference has invalid data size").
+                // The bytes won't improve on retry, so skip and mark handled — logged once, not every render.
+                MPLog.mapbox.error("Skipping invalid marker image \(id): \(error)")
+                imagesAdded[id] = imageIdentity
+            } catch {
+                // Unexpected (non-StyleError) failure: don't abort the render, and don't mark handled,
+                // so a transient failure is retried on the next render instead of being suppressed.
+                MPLog.mapbox.error("Unexpected error adding marker image \(id): \(error)")
+            }
         } else {
             try? map?.removeImage(withId: id)
             imagesAdded.removeValue(forKey: id)
@@ -928,21 +963,49 @@ class MBRenderer {
             let y = model.marker?.properties[.labelGraphicStretchY] as? [[Int]],
             let content = model.marker?.properties[.labelGraphicContent] as? [Int], content.count == 4
         {
-            try map?.addImage(
-                graphicImage,
-                id: id,
-                stretchX: x.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
-                stretchY: y.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
-                content: ImageContent(left: Float(content[0]), top: Float(content[1]), right: Float(content[2]), bottom: Float(content[3])))
+            // Guard like the marker/2D-model paths so a bad graphic label is logged once, not every render.
+            let graphicImageIdentity = ObjectIdentifier(graphicImage)
+            guard imagesAdded[id] != graphicImageIdentity else { return }
+            do {
+                try styleImaging?.registerImage(
+                    graphicImage,
+                    id: id,
+                    stretchX: x.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
+                    stretchY: y.compactMap { ImageStretches(first: Float($0[0]), second: Float($0[1])) },
+                    content: ImageContent(left: Float(content[0]), top: Float(content[1]), right: Float(content[2]), bottom: Float(content[3])))
+                imagesAdded[id] = graphicImageIdentity
+            } catch let error as StyleError {
+                // Bad asset (see updateImage marker path): skip and mark handled.
+                MPLog.mapbox.error("Skipping invalid graphic label image \(id): \(error)")
+                imagesAdded[id] = graphicImageIdentity
+            } catch {
+                // Unexpected failure: don't abort, don't mark handled (retry next render).
+                MPLog.mapbox.error("Unexpected error adding graphic label image \(id): \(error)")
+            }
         }
     }
 
-    private func update2DModel(for model: any MPViewModel) async throws {
+    private func update2DModel(for model: any MPViewModel) async {
         if let model2D = model.data[.model2D] as? UIImage, let id = model.model2D?.id, is2dModelsEnabled {
             let imageIdentity = ObjectIdentifier(model2D)
             guard imagesAdded[id] != imageIdentity else { return }
-            try map?.addImage(model2D, id: id)
-            imagesAdded[id] = imageIdentity
+            // A single malformed 2D-model image (e.g. a backend asset that decoded to an invalid
+            // raster size) makes Mapbox's addImage throw a StyleError. That must NOT abort the render —
+            // an uncaught throw here drops every feature on the floor and leaves the previous floor's
+            // models on screen (the cross-floor "bleed"). Skip just this image; its symbol renders
+            // blank while everything else commits.
+            do {
+                try styleImaging?.registerImage(model2D, id: id)
+                imagesAdded[id] = imageIdentity
+            } catch let error as StyleError {
+                // Bad asset: skip and mark handled so the same bad bytes aren't retried every render;
+                // a re-downloaded (valid) image is a new instance with a new identity and will retry.
+                MPLog.mapbox.error("Skipping invalid 2D model image \(id): \(error)")
+                imagesAdded[id] = imageIdentity
+            } catch {
+                // Unexpected failure: don't abort, don't mark handled (retry next render).
+                MPLog.mapbox.error("Unexpected error adding 2D model image \(id): \(error)")
+            }
         }
     }
 
