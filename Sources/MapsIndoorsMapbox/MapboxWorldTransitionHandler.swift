@@ -51,6 +51,21 @@ class MapboxWorldTransitionHandler {
         mapboxMapOverride ?? map?.mapView?.mapboxMap
     }
 
+    /// Force a fresh application of the world / marker visibility, discarding the
+    /// applied-state caches first, then re-apply against the current camera.
+    ///
+    /// Needed whenever the previously applied config can no longer be trusted:
+    /// a style (re)load resets every style-import config back to its defaults,
+    /// and a transition-level change must take effect immediately. In both cases
+    /// the `lastApplied*` caches would otherwise short-circuit the re-apply. This
+    /// runs independently of camera movement, so the configured transition level
+    /// is honoured even when the map opens already zoomed past it (SPEX-2097).
+    func reapplyVisibility() async {
+        lastAppliedWorldState = nil
+        lastAppliedMarkerConfig = nil
+        await configureMapsIndoorsVsMapboxVisibility()
+    }
+
     /// Overridable so tests can subclass via `@testable import` and count invocations
     /// scheduled by `MapBoxProvider` property didSet observers.
     func configureMapsIndoorsVsMapboxVisibility() async {
@@ -96,7 +111,6 @@ class MapboxWorldTransitionHandler {
 
             // Skip redundant style updates when world state hasn't changed
             if newWorldState != lastAppliedWorldState {
-                lastAppliedWorldState = newWorldState
                 switch newWorldState {
                 case .mapsindoors:
                     try applyShowMapsIndoorsWorld()
@@ -105,6 +119,12 @@ class MapboxWorldTransitionHandler {
                 case .intermediary:
                     try applyShowIntermediaryWorld()
                 }
+                // Cache the applied state only after the writes succeed. If a
+                // write throws — e.g. the style is still settling right after
+                // load and cannot yet accept import config — the state stays
+                // uncached so the next call retries instead of wrongly treating
+                // it as applied (SPEX-2097).
+                lastAppliedWorldState = newWorldState
             }
 
             if enableMapboxBuildings == false {

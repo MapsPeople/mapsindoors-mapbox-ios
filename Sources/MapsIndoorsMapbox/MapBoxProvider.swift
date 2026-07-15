@@ -3,6 +3,20 @@ import MapboxMaps
 @_spi(Private) import MapsIndoors
 @_spi(Private) import MapsIndoorsCore
 
+/// Test seam over the single `MapboxMap.loadStyle` call `_loadMapbox()` makes.
+/// Tests inject a fake to drive the completion — including firing it more than
+/// once — so the resume-once guard and late-success recovery can be asserted
+/// without a live Mapbox style / access token (SPEX-2169).
+protocol MBStyleLoading: AnyObject {
+    func loadMapsIndoorsStyle(_ styleURI: StyleURI, completion: @escaping (Error?) -> Void)
+}
+
+extension MapboxMap: MBStyleLoading {
+    func loadMapsIndoorsStyle(_ styleURI: StyleURI, completion: @escaping (Error?) -> Void) {
+        loadStyle(styleURI) { error in completion(error) }
+    }
+}
+
 public class MapBoxProvider: MPMapProvider {
     public let model2DResolutionLimit = 500
 
@@ -22,7 +36,29 @@ public class MapBoxProvider: MPMapProvider {
     /// assert that property didSet observers schedule a visibility re-apply.
     internal var mapboxTransitionHandler: MapboxWorldTransitionHandler?
 
-    public var transitionLevel = 17
+    /// Test injection point for the style loader — when non-nil, the MapsIndoors
+    /// style load routes here instead of the live `MapboxMap` (SPEX-2169).
+    internal var styleLoaderOverride: MBStyleLoading?
+
+    /// Whether the most recent MapsIndoors style load reported a failure. Used to
+    /// recover when a later callback for the same attempt succeeds (e.g. after a
+    /// dynamic access token arrives), rather than leaving the map on a style that
+    /// never loaded (SPEX-2169).
+    internal private(set) var styleLoadFailed = false
+
+    /// The zoom level at which the map transitions between Mapbox-centric and
+    /// MapsIndoors-centric rendering. Changing it re-applies the world/marker
+    /// visibility against the current camera, so `setMapsIndoorsTransitionLevel`
+    /// takes effect immediately rather than only once the level is next crossed
+    /// by a camera movement (SPEX-2097).
+    public var transitionLevel = 17 {
+        didSet {
+            guard oldValue != transitionLevel else { return }
+            Task { @MainActor [weak self] in
+                await self?.mapboxTransitionHandler?.reapplyVisibility()
+            }
+        }
+    }
 
     /// Controls visibility of Mapbox base-map POI / place / transit labels.
     /// Only `true` shows them; `nil` (default) and `false` hide them.
@@ -206,6 +242,16 @@ public class MapBoxProvider: MPMapProvider {
             MainActor.assumeIsolated {
                 self?.adjustOrnaments()
             }
+            // A style (re)load resets every style-import config back to its
+            // defaults, so re-apply the MapsIndoors-vs-Mapbox world visibility
+            // once the style is ready to accept it. This is the reliable
+            // "style ready" signal and runs regardless of camera movement, so
+            // the configured transition level is honoured even when the map
+            // opens already zoomed past it and no camera event ever fires
+            // (SPEX-2097).
+            Task { [weak self] in
+                await self?.mapboxTransitionHandler?.reapplyVisibility()
+            }
             if self?.useMapsIndoorsStyle == false {
                 Task { [weak self] in
                     await self?.verifySetup()
@@ -262,18 +308,82 @@ public class MapBoxProvider: MPMapProvider {
         loadTask = nil
     }
 
+    /// Loads the MapsIndoors Mapbox style and resumes the caller exactly once.
+    ///
+    /// Mapbox's `loadStyle` completion does not honour a once-only contract: its
+    /// error and completed callbacks can both fire for the same load attempt.
+    /// With a dynamic / backend-issued token the initial load 401s (`error`) and,
+    /// once the token is set, gl-native retries the still-registered request and
+    /// succeeds (`completed`) — invoking this closure a second time. Resuming a
+    /// checked continuation twice is a fatal `SWIFT TASK CONTINUATION MISUSE`, so
+    /// this guards to resume exactly once. No lock needed: `_loadMapbox()` is
+    /// @MainActor and Mapbox delivers these callbacks on the main thread. The
+    /// per-callback outcome is handed to `handleStyleLoadCallback` so a late
+    /// success after an initial failure can recover the style (SPEX-2169).
+    ///
+    /// Extracted + routed through `styleLoaderOverride` so the guard and the
+    /// recovery are unit-testable without a live Mapbox style / access token.
+    @MainActor
+    func loadMapsIndoorsStyleResumingOnce() async {
+        // Scope the failure flag to this attempt. Mapbox retains the previous
+        // attempt's completion closure indefinitely, so a late callback from an
+        // earlier attempt could otherwise see a stale `styleLoadFailed` and
+        // trigger spurious recovery against the wrong load. Resetting here also
+        // keeps the flag consistent on the styleURI-nil / nil-loader early exits
+        // (no load attempted) (SPEX-2169).
+        styleLoadFailed = false
+        guard let styleURI = StyleURI(url: URL(string: styleUrl)!) else { return }
+        let loader = styleLoaderOverride ?? mapView?.mapboxMap
+        await withCheckedContinuation { [weak self] (continuation: CheckedContinuation<Void, Never>) in
+            var didResume = false
+            func resumeOnce() {
+                guard didResume == false else { return }
+                didResume = true
+                continuation.resume()
+            }
+            guard let loader else {
+                resumeOnce()
+                return
+            }
+            loader.loadMapsIndoorsStyle(styleURI) { [weak self] error in
+                let isFirstCallback = (didResume == false)
+                resumeOnce()
+                self?.handleStyleLoadCallback(error: error, isFirstCallback: isFirstCallback)
+            }
+        }
+    }
+
+    /// Reacts to a callback from the MapsIndoors style load. The first callback
+    /// records the outcome (and surfaces a failure instead of silently proceeding
+    /// as if the style loaded). A later callback for the same attempt that
+    /// succeeds after the first failed means the style has now actually loaded
+    /// (e.g. a dynamic token arrived and gl-native's retry succeeded) — recover by
+    /// re-applying the style-import config against the now-loaded style, rather
+    /// than leaving the map on the unloaded/default style (SPEX-2169).
+    @MainActor
+    func handleStyleLoadCallback(error: Error?, isFirstCallback: Bool) {
+        if isFirstCallback {
+            styleLoadFailed = (error != nil)
+            if let error {
+                MPLog.mapbox.error("MapsIndoors Mapbox style failed to load: \(error.localizedDescription)")
+            }
+            return
+        }
+        guard styleLoadFailed, error == nil else { return }
+        styleLoadFailed = false
+        adjustOrnaments()
+        Task { @MainActor [weak self] in
+            // reapplyVisibility() resets the world-state cache first — a style
+            // (re)load reset the import config to defaults, so a plain
+            // configure() would be a cache no-op here (SPEX-2097 + SPEX-2169).
+            await self?.mapboxTransitionHandler?.reapplyVisibility()
+        }
+    }
+
     @MainActor
     private func _loadMapbox() async {
         if useMapsIndoorsStyle, NetworkPathMonitor.shared.isConnected {
-            await withCheckedContinuation { [weak self] continuation in
-                guard let self else {
-                    continuation.resume()
-                    return
-                }
-                mapView?.mapboxMap.loadStyle(StyleURI(url: URL(string: styleUrl)!)!) { _ in
-                    continuation.resume()
-                }
-            }
+            await loadMapsIndoorsStyleResumingOnce()
         }
 
         // Re-assert ornament adjustments after every load. The
