@@ -21,7 +21,9 @@ enum Constants {
 
         // Route rendering
         static let lineLayer = "ROUTE_POLYLINE_LAYER"
+        static let baseLineLayer = "ROUTE_BASE_POLYLINE_LAYER"
         static let animatedLineLayer = "ROUTE_ANIMATED_POLYLINE_LAYER"
+        static let stampLayer = "ROUTE_STAMP_LAYER"
         static let routeMarkerLayer = "ROUTE_MARKER_LAYER"
 
         static let clippingLayer = "CLIPPING_LAYER"

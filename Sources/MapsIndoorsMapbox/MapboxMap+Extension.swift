@@ -49,6 +49,11 @@ extension MapboxMap {
 
         let routeLineLayer = LineLayer(id: Constants.LayerIDs.lineLayer, source: Constants.SourceIDs.lineSource)
 
+        let routeBaseLayer = LineLayer(id: Constants.LayerIDs.baseLineLayer, source: Constants.SourceIDs.lineSource)
+
+        // Repeating stamp (arrow / custom icon) along the route line, placed on the same line source.
+        let routeStampLayer = SymbolLayer(id: Constants.LayerIDs.stampLayer, source: Constants.SourceIDs.lineSource)
+
         let routeMarkerLayer = SymbolLayer(id: Constants.LayerIDs.routeMarkerLayer, source: Constants.SourceIDs.routeMarkerSource)
 
         var clipLayer = ClipLayer(id: Constants.LayerIDs.clippingLayer, source: Constants.SourceIDs.clippingSource)
@@ -67,7 +72,9 @@ extension MapboxMap {
                 model2DLayer,
                 flatLabelsLayer,
                 routeLineLayer,
+                routeBaseLayer,
                 routeAnimatedLayer,
+                routeStampLayer,
                 model3DLayer,
                 wallExtrusionLayer,
                 featureExtrusionLayer,

@@ -687,8 +687,19 @@ class MBRenderer {
         let featureExtrusionFeature: Feature?
     }
 
+    /// Test instrumentation: the peak number of `render` bodies running
+    /// concurrently. The provider serializes renders, so this must never exceed
+    /// 1 — `MapBoxProviderConcurrencyTests` asserts on it to prove the
+    /// serialization barrier holds under concurrent callers.
+    private(set) var peakConcurrentRenders = 0
+    private var activeRenders = 0
+
     @MainActor
     func render(models: [any MPViewModel]) async throws {
+        activeRenders += 1
+        peakConcurrentRenders = max(peakConcurrentRenders, activeRenders)
+        defer { activeRenders -= 1 }
+
         try Task.checkCancellation()
         let startTime = DispatchTime.now()
         await self.removeOldModels(models: models)

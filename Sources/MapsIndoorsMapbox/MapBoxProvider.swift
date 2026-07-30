@@ -124,7 +124,7 @@ public class MapBoxProvider: MPMapProvider {
         tileProvider?.update()
     }
 
-    private var renderer: MBRenderer?
+    var renderer: MBRenderer?
 
     /// In-flight render task. A new `setViewModels` cancels and awaits this
     /// before starting its own render so two render task-groups never share
@@ -182,24 +182,31 @@ public class MapBoxProvider: MPMapProvider {
             configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
 
-        // Serialize renders: cancel and await the predecessor so its task-group
-        // children release their `MPViewModel` captures before we hand a new
-        // models array to the renderer. Renderer property assignments are done
-        // *after* this barrier so the predecessor's in-flight render cannot
-        // observe mid-flight mutation of these settings.
+        // Serialize renders so only one render flow is ever alive, even under
+        // multiple concurrent callers. The predecessor is captured and the
+        // replacement published with no `await` between the read of `renderTask`
+        // and its reassignment, so a second caller arriving on the main actor
+        // sees *this* task as its predecessor and chains behind it instead of
+        // all parking on the same older task (which would let their renders run
+        // concurrently once that shared predecessor completed). Awaiting the
+        // predecessor — and the renderer property assignments that must not
+        // mutate settings mid-flight — happen *inside* the new task, after the
+        // prior render's task-group children have released their `MPViewModel`
+        // captures.
         let previous = renderTask
         previous?.cancel()
-        await previous?.value
-
-        // Ignore `forceClear` - not applicable to mapbox rendering
-        renderer?.customInfoWindow = customInfoWindow
-        renderer?.collisionHandling = collisionHandling
-        renderer?.featureExtrusionOpacity = featureExtrusionOpacity
-        renderer?.wallExtrusionOpacity = wallExtrusionOpacity
-
         let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
+
+            // Ignore `forceClear` - not applicable to mapbox rendering
+            self.renderer?.customInfoWindow = self.customInfoWindow
+            self.renderer?.collisionHandling = self.collisionHandling
+            self.renderer?.featureExtrusionOpacity = self.featureExtrusionOpacity
+            self.renderer?.wallExtrusionOpacity = self.wallExtrusionOpacity
+
             do {
-                try await self?.renderer?.render(models: models)
+                try await self.renderer?.render(models: models)
             } catch {}
         }
         renderTask = task
