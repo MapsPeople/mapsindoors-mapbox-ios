@@ -17,10 +17,14 @@ class MBPositionPresenter: MPPositionPresenter {
     private let blueDotIconId = "MP_BLUEDOT_ICON"
     private let blueDotCircleSizeId = "MP_BLUEDOT_CIRLCE_SIZE"
 
-    /// The slot the blue dot layers live in — above "middle", where all other MapsIndoors content
-    /// (including the route) is placed. On a slot-aware style this is what decides render order, so
-    /// the layers do not need to be positioned relative to another layer once they carry it.
-    private let blueDotSlot: Slot = "top"
+    /// The slot the blue dot layers live in — above "middle", where all other
+    /// MapsIndoors content (including the route) is placed. These layers are created
+    /// here rather than in `addMapsIndoorsLayers()`, so they are deliberately outside
+    /// `Constants.slotForLayerId` (see its doc comment).
+    ///
+    /// `internal` rather than `private` so the slot-contract test can assert it is a
+    /// valid slot — `Slot`'s string-literal init does not validate, so a typo compiles.
+    static let blueDotSlot: Slot = "top"
 
     func apply(
         position: CLLocationCoordinate2D,
@@ -65,15 +69,10 @@ class MBPositionPresenter: MPPositionPresenter {
     ) {
         addSourcesAndLayersIfNotPresent()
 
-        // No moveLayer here: the layers' "top" slot decides render order, so a positional move is
-        // redundant — and, worse, a throwing move as the first statement would skip everything below
-        // on every position update, permanently hiding the blue dot.
-        //
-        // Each step is also caught independently, and the source update — which is what actually
-        // moves the dot — sits outside every `do` block. Previously one throw anywhere in this
-        // method abandoned the rest of it, and because the source update came last, a failure while
-        // styling a layer stopped the dot from being positioned at all. Styling that fails should
-        // cost styling, not the position.
+        // No moveLayer here: the layers' "top" slot decides render order, so a
+        // positional move is redundant. Each step is also caught independently: a
+        // throw in one (e.g. an updateLayer on a layer that failed to create) must
+        // not skip the source and icon updates that actually place and draw the dot.
         do {
             try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
                 circleLayer.visibility = .constant(.visible)
@@ -82,7 +81,7 @@ class MBPositionPresenter: MPPositionPresenter {
                 circleLayer.circleStrokeColor = .constant(StyleColor(circleStrokeColor))
                 circleLayer.circleStrokeOpacity = .constant(1 - circleStrokeColor.cgColor.alpha)
                 circleLayer.circleStrokeWidth = .constant(circleStrokeWidth)
-                circleLayer.slot = blueDotSlot
+                circleLayer.slot = Self.blueDotSlot
                 circleLayer.circleEmissiveStrength = .constant(1.0)
             }
         } catch {
@@ -99,7 +98,7 @@ class MBPositionPresenter: MPPositionPresenter {
                 markerLayer.iconPitchAlignment = .constant(.map)
                 markerLayer.iconAllowOverlap = .constant(true)
                 markerLayer.textAllowOverlap = .constant(true)
-                markerLayer.slot = blueDotSlot
+                markerLayer.slot = Self.blueDotSlot
             }
         } catch {
             MPLog.mapbox.error("Error updating blue dot marker layer: " + error.localizedDescription)
@@ -174,16 +173,15 @@ class MBPositionPresenter: MPPositionPresenter {
                     }
                 )
 
-                circleLayer.slot = blueDotSlot
-                // Only anchor above TILE_LAYER when it is actually there. The tile layer is removed
-                // and re-added whenever the tile provider is swapped on a floor or venue change, and
-                // an unresolvable `layerPosition` is an error rather than a fallback — so anchoring
-                // to it unconditionally meant a swap in progress threw here, skipped the marker
-                // source and layer below, and left the blue dot never created at all. Adding
-                // unpositioned appends at the top of the stack, which is where the dot belongs; on a
-                // slot-aware style its "top" slot decides the order regardless.
-                if map.layerExists(withId: Constants.LayerIDs.tileLayer) {
-                    try map.addLayer(circleLayer, layerPosition: .above(Constants.LayerIDs.tileLayer))
+                circleLayer.slot = Self.blueDotSlot
+                // Anchor above the top-most existing MapsIndoors layer, not TILE_LAYER
+                // (the bottom-most). On a slot-aware style the "top" slot already orders
+                // the dot above "middle"; but on a style with no slots — reachable via
+                // useMapsIndoorsStyle(false) or offline — insertion order is all there is,
+                // and .above(TILE_LAYER) would leave the route drawing over the dot
+                // (SPEX-2354/SPEX-2355). If no MapsIndoors layer exists yet, add unpositioned.
+                if let anchor = topMostMapsIndoorsLayerId(in: map) {
+                    try map.addLayer(circleLayer, layerPosition: .above(anchor))
                 } else {
                     try map.addLayer(circleLayer)
                 }
@@ -197,11 +195,19 @@ class MBPositionPresenter: MPPositionPresenter {
 
             if map.layerExists(withId: layerBlueDotMarker) == false {
                 var markerLayer = SymbolLayer(id: layerBlueDotMarker, source: srcBlueDotMarker)
-                markerLayer.slot = blueDotSlot
+                markerLayer.slot = Self.blueDotSlot
                 try map.addLayer(markerLayer, layerPosition: .above(layerBlueDotCircle))
             }
         } catch {
             MPLog.mapbox.error("Error attempting to create blue dot sources and layers: " + error.localizedDescription)
         }
+    }
+
+    /// The top-most MapsIndoors layer currently in the style, in render/insertion order,
+    /// or nil if none exist yet. `allLayerIdentifiers` is bottom-to-top, so the last match
+    /// is the highest. Membership is decided by the slot registry — the authoritative set
+    /// of MapsIndoors layer ids — so basemap layers are never picked as the anchor.
+    private func topMostMapsIndoorsLayerId(in map: MapboxMap) -> String? {
+        map.allLayerIdentifiers.last { Constants.slotForLayerId.keys.contains($0.id) }?.id
     }
 }

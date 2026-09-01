@@ -14,8 +14,6 @@ enum Constants {
         static let model2DLayer = "MODEL_2D_LAYER"
         static let model2DElevatedLayer = "MODEL_2D_ELEVATED_LAYER"
         static let model3DLayer = "MODEL_3D_LAYER"
-        static let circleLayer = "CIRCLE_LAYER"
-        static let blueDotLayer = "BLUEDOT_LAYER"
         static let wallExtrusionLayer = "WALL_EXTRUSION_LAYER"
         static let featureExtrusionLayer = "FEATURE_EXTRUSION_LAYER"
 
@@ -37,8 +35,6 @@ enum Constants {
         static let geoJsonSourceExtrusions = "GEOJSON_EXTRUSIONS_SOURCE"
         static let geoJsonSourceWalls = "GEOJSON_WALLS_SOURCE"
         static let geoJsonSource3dModels = "GEOJSON_3DMODELS_SOURCE"
-        static let circleSource = "CIRCLE_SOURCE"
-        static let blueDotSource = "BLUEDOT_SOURCE"
 
         // Route rendering
         static let lineSource = "ROUTE_POLYLINE_SOURCE"
@@ -55,5 +51,12 @@ enum Constants {
         static let dotIconId = "DOT_ICON_ID"
         static let headingProperty = "HEADING_PROPERTY"
         static let headingIconId = "HEADING_ICON_ID"
+    }
+
+    enum Style {
+        /// The MapsIndoors-managed Mapbox style rendered by `MapBoxProvider` and
+        /// cached by `MBBaseMapCacheProvider`. Single source of truth so the
+        /// cached tiles can never diverge from the style being rendered.
+        static let mapsIndoorsDefaultURI = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 import MapboxMaps
-import MapsIndoorsCore
+@_spi(Private) import MapsIndoorsCore
 
 /// Test seam over the subset of `MapboxMap` this handler actually exercises.
 /// Tests inject a recording fake to assert per-flag writes without standing up
@@ -18,7 +18,38 @@ class MapboxWorldTransitionHandler {
     private let transitLabels = "showTransitLabels"
     private let roadLabels = "showRoadLabels"
     private let poiLabels = "showPointOfInterestLabels"
+    // Mapbox Standard's fill-extrusion building opacity (0.0–1.0). A float, so it fades
+    // buildings gradually across the transition band — the "full" online experience.
     private let buildingOpacity = "buildingsOpacity"
+    // Mapbox Standard's binary umbrella toggle for all 3D objects (buildings + landmark models
+    // + trees). Used as the offline fallback (see `useShow3dObjectsNow`).
+    private let show3dObjects = "show3dObjects"
+
+    // How base-map buildings are hidden across the transition band:
+    //  - buildingsOpacity: graded float → gradual fade. The live Standard style honours this
+    //    key online.
+    //  - show3dObjects: binary umbrella toggle → hard hide, the offline fallback (the cached
+    //    Standard style does not honour buildingsOpacity offline).
+    //  - auto (default): buildingsOpacity when online, show3dObjects when offline — full
+    //    experience online, graceful degradation offline.
+    enum BuildingHideMode: Int { case auto = 0, buildingsOpacity = 1, show3dObjects = 2 }
+
+    // Optional override, read live from UserDefaults. Absent/0 → auto. Primarily a test/QA seam;
+    // observers re-apply on `buildingHideModeChanged` so a change takes effect immediately.
+    static let buildingHideModeDefaultsKey = "pp.debug.buildingHideMode"
+    static let buildingHideModeChanged = Notification.Name("pp.debug.buildingHideModeChanged")
+
+    /// Whether to hide buildings via the binary `show3dObjects` right now — honours the override,
+    /// and in `auto` falls back to `show3dObjects` only when offline.
+    private var useShow3dObjectsNow: Bool {
+        switch BuildingHideMode(rawValue: UserDefaults.standard.integer(forKey: Self.buildingHideModeDefaultsKey)) ?? .auto {
+        case .buildingsOpacity: return false
+        case .show3dObjects: return true
+        case .auto: return !NetworkPathMonitor.shared.isConnected
+        }
+    }
+
+    private var reapplyObservers: [NSObjectProtocol] = []
 
     weak var map: MapBoxProvider?
     var enableMapboxBuildings = true {
@@ -34,6 +65,43 @@ class MapboxWorldTransitionHandler {
 
     nonisolated required init(mapProvider: MapBoxProvider) {
         map = mapProvider
+        // Re-apply immediately when connectivity changes (auto mode flips buildingsOpacity <->
+        // show3dObjects) or when the building-hide override changes — so the switch is visible
+        // without having to cross the transition band again.
+        for name in [NetworkPathMonitor.networkStatusChanged, Self.buildingHideModeChanged] {
+            let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.reapplyVisibility() }
+            }
+            reapplyObservers.append(token)
+        }
+    }
+
+    deinit {
+        reapplyObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    /// Apply the base-map building visibility for the given target opacity.
+    ///
+    /// Writes BOTH import-config keys on every apply — the active mechanism plus the other key reset
+    /// to its neutral (non-suppressing) value. The two keys are independent, and only a style reload
+    /// resets import config to defaults, so writing just one would let the other stay latched: an
+    /// offline `show3dObjects = false` would keep all base-map 3D content hidden after reconnecting
+    /// (when we switch to `buildingsOpacity`) until the next style reload. Re-applying both — driven
+    /// by the `reapplyVisibility()` on a connectivity/mode change — guarantees a mechanism switch
+    /// takes effect immediately.
+    ///
+    /// - `useShow3dObjectsNow` (offline, or forced): drive the binary umbrella `show3dObjects`
+    ///   (opacity ≥ 1.0 → shown, otherwise hidden) and neutralise the graded key to fully-opaque.
+    /// - otherwise (online): drive the graded `buildingsOpacity` fade and neutralise the umbrella to
+    ///   shown (`true`), so a prior offline hard-hide can't linger.
+    private func applyBuildingConfig(opacity: Double, on map: MBStyleImportConfigSetting) throws {
+        if useShow3dObjectsNow {
+            try map.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 1.0)
+            try map.setStyleImportConfigProperty(for: baseMap, config: show3dObjects, value: opacity >= 1.0)
+        } else {
+            try map.setStyleImportConfigProperty(for: baseMap, config: show3dObjects, value: true)
+            try map.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: opacity)
+        }
     }
 
     /// Tracks the last applied world state to avoid redundant style config calls
@@ -128,7 +196,7 @@ class MapboxWorldTransitionHandler {
             }
 
             if enableMapboxBuildings == false {
-                try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
+                try applyBuildingConfig(opacity: 0.0, on: activeMapboxMap)
             }
         } catch {
             MPLog.mapbox.info("Failed to configure style config properties.")
@@ -139,7 +207,7 @@ class MapboxWorldTransitionHandler {
     private func applyShowMapsIndoorsWorld() throws {
         guard let map, let activeMapboxMap else { return }
 
-        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.0)
+        try applyBuildingConfig(opacity: 0.0, on: activeMapboxMap)
 
         if map.showMapboxMapMarkers == true {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
@@ -160,14 +228,16 @@ class MapboxWorldTransitionHandler {
 
     private func applyShowIntermediaryWorld() throws {
         guard let activeMapboxMap else { return }
-        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 0.5)
+        // Half-fade the base-map buildings in the transition band so they blend out gradually
+        // on the way into the MapsIndoors world (rather than snapping off).
+        try applyBuildingConfig(opacity: 0.5, on: activeMapboxMap)
     }
 
     /// Show all Mapbox content, if enabled
     private func applyShowMapboxWorld() throws {
         guard let map, let activeMapboxMap else { return }
 
-        try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: enableMapboxBuildings ? 1.0 : 0.0)
+        try applyBuildingConfig(opacity: enableMapboxBuildings ? 1.0 : 0.0, on: activeMapboxMap)
 
         if map.showMapboxMapMarkers == true {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)

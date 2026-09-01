@@ -17,7 +17,10 @@ extension MapboxMap: MBStyleLoading {
     }
 }
 
-public class MapBoxProvider: MPMapProvider {
+// SAFETY: (SPEX-1975) MapBoxProvider wraps main-thread-only Mapbox UI and is only ever
+// accessed on the main actor, so it is safe to share by that convention. (MPMapProvider is Sendable;
+// the type-system proof is deferred with the wider provider-isolation work.)
+public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public let model2DResolutionLimit = 500
 
     public var enableNativeMapBuildings: Bool = true {
@@ -281,9 +284,11 @@ public class MapBoxProvider: MPMapProvider {
         }
 
         registerLocalFallbackFontWith(filenameString: "OpenSans-Bold.ttf", bundleIdentifierString: "Fonts")
+
+        MPMapsIndoors.baseMapCacheProvider = MBBaseMapCacheProvider()
     }
 
-    private let styleUrl = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
+    private let styleUrl = Constants.Style.mapsIndoorsDefaultURI
 
     private var cameraChangedCancellable: AnyCancelable? = nil
     private var cameraIdleCancellable: AnyCancelable? = nil
@@ -419,7 +424,11 @@ public class MapBoxProvider: MPMapProvider {
         cameraChangedCancellable = mapView?.mapboxMap.onCameraChanged.observe { [weak self] _ in
             guard let self else { return }
             self._cameraDebounceTask?.cancel()
-            self._cameraDebounceTask = Task { [weak self] in
+            // @MainActor: cameraChangedPosition() reads main-thread-only state
+            // (e.g. cameraPosition, which traps off-main). Without this, the
+            // Task resumes on the cooperative pool after the sleep and the
+            // delegate call would trap on every camera change.
+            self._cameraDebounceTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 150_000_000)  // 150ms debounce
                 guard Task.isCancelled == false else { return }
                 self?.delegate?.cameraChangedPosition()
@@ -584,6 +593,26 @@ public class MapBoxProvider: MPMapProvider {
         _ = delegate?.didTapInfoWindowOf(locationId: locationId)
     }
 
+    /// Offset from the logo's margins to the attribution ornament's, so the info **glyph** lines up with the
+    /// logo rather than the ornament's frame doing so.
+    ///
+    /// Mapbox wraps a system `.infoLight` button in a 44pt tap target and bottom-aligns the glyph inside it,
+    /// so the frame is wider and taller than what is seen: `x` pulls back the horizontal overhang, `y` centres
+    /// the glyph on the logo instead of leaving the two bottom-aligned.
+    ///
+    /// `bounds` for the ornament, not `intrinsicContentSize`: it is sized by constraints and reports none.
+    ///
+    /// Internal (not `private`) so tests can exercise the arithmetic with stub views — it needs no live map.
+    @MainActor
+    static func attributionOffset(fromLogo logo: UIView, ornament: UIView) -> CGPoint {
+        let glyph = UIButton(type: .infoLight).intrinsicContentSize
+        let logoSize = logo.intrinsicContentSize
+        let horizontalOverhang = max(0, (ornament.bounds.width - glyph.width) / 2)
+        return CGPoint(
+            x: logoSize.width - horizontalOverhang,
+            y: (logoSize.height - glyph.height) / 2)
+    }
+
     @MainActor
     private func adjustOrnaments() {
         guard let mapView else { return }
@@ -615,10 +644,17 @@ public class MapBoxProvider: MPMapProvider {
         } else {
             // Both shown: keep the Mapbox logo and its attribution "i" button
             // together on the bottom-left (the "i" is Mapbox's own attribution
-            // control, so it belongs with the Mapbox logo). They share the same
-            // left margin; Mapbox's `OrnamentsManager` lays the attribution out
-            // relative to the logo on that corner. The MapsPeople logo is
-            // anchored bottom-right (see `mapsPeopleLogoPosition`).
+            // control, so it belongs with the Mapbox logo), the button to the
+            // RIGHT of the logo. The MapsPeople logo is anchored bottom-right
+            // (see `mapsPeopleLogoPosition`).
+            //
+            // The attribution button takes the logo's margins plus the offset
+            // that lines its glyph up with the logo. It cannot reuse its own
+            // margin: Mapbox defaults it to bottom-TRAILING, so that x is an
+            // inset from the right edge and reapplying it on the left drops the
+            // "i" onto the logo — the bug. Every input is either written back
+            // unchanged or intrinsic, so re-running this on each style load and
+            // padding change recomputes the same point.
             logoView.isHidden = false
             attributionButton.isHidden = false
 
@@ -626,8 +662,11 @@ public class MapBoxProvider: MPMapProvider {
             mapView.ornaments.options.logo.position = .bottomLeft
             mapView.ornaments.options.logo.margins = CGPoint(x: logoLeftMargin, y: bottomPadding)
 
+            let attributionOffset = Self.attributionOffset(fromLogo: logoView, ornament: attributionButton)
+
             mapView.ornaments.options.attributionButton.position = .bottomLeft
-            mapView.ornaments.options.attributionButton.margins = CGPoint(x: logoLeftMargin, y: bottomPadding)
+            mapView.ornaments.options.attributionButton.margins = CGPoint(
+                x: logoLeftMargin + attributionOffset.x, y: bottomPadding + attributionOffset.y)
         }
     }
 

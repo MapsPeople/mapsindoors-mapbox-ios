@@ -189,7 +189,7 @@ class MBRenderer {
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
             layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
             layerUpdate.textLetterSpacing = .constant(-0.01)
-            layerUpdate.slot = .middle
+
             layerUpdate.symbolZElevate = .constant(true)
 
             // text styling
@@ -233,8 +233,6 @@ class MBRenderer {
             layerUpdate.symbolPlacement = .constant(.point)
 
             layerUpdate.textRotate = .expression(Exp(.get) { Key.labelBearing.rawValue })
-
-            layerUpdate.slot = .middle
 
             let stops: [Double: Exp] = [
                 1: Exp(.product) {
@@ -319,7 +317,7 @@ class MBRenderer {
             layerUpdate.fillColor = .expression(Exp(.get) { Key.polygonFillcolor.rawValue })
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.polygonFillOpacity.rawValue })
             layerUpdate.fillSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.polygonArea.rawValue } })
-            layerUpdate.slot = .middle
+
             layerUpdate.filter = Exp(.any) {
                 Exp(.eq) {
                     Exp(.get) { Key.type.rawValue }
@@ -337,7 +335,7 @@ class MBRenderer {
             layerUpdate.lineOpacity = .expression(Exp(.get) { Key.polygonStrokeOpacity.rawValue })
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.polygonStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
-            layerUpdate.slot = .middle
+
             layerUpdate.filter = Exp(.any) {
                 Exp(.eq) {
                     Exp(.get) { Key.type.rawValue }
@@ -355,7 +353,7 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.floorPlanFillLayer, type: FillLayer.self) { layerUpdate in
             layerUpdate.fillColor = .expression(Exp(.get) { Key.floorPlanFillColor.rawValue })
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.floorPlanFillOpacity.rawValue })
-            layerUpdate.slot = .middle
+
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
                 Exp(.literal) { MPRenderedFeatureType.floorplan.rawValue }
@@ -367,7 +365,7 @@ class MBRenderer {
             layerUpdate.lineOpacity = .expression(Exp(.get) { Key.floorPlanStrokeOpacity.rawValue })
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.floorPlanStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
-            layerUpdate.slot = .middle
+
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
                 Exp(.literal) { MPRenderedFeatureType.floorplan.rawValue }
@@ -383,7 +381,6 @@ class MBRenderer {
             layerUpdate.iconRotate = .expression(Exp(.get) { Key.model2dBearing.rawValue })
             layerUpdate.iconPitchAlignment = .constant(.map)
             layerUpdate.iconRotationAlignment = .constant(.map)
-            layerUpdate.slot = .middle
 
             let stops: [Double: Exp] = [
                 1: Exp(.product) {
@@ -437,7 +434,6 @@ class MBRenderer {
             layerUpdate.iconRotate = .expression(Exp(.get) { Key.model2dBearing.rawValue })
             layerUpdate.iconPitchAlignment = .constant(.map)
             layerUpdate.iconRotationAlignment = .constant(.map)
-            layerUpdate.slot = .middle
 
             layerUpdate.symbolZElevate = .constant(true)
 
@@ -491,7 +487,6 @@ class MBRenderer {
             layerUpdate.modelScale = .expression(Exp(.get) { Key.model3DScale.rawValue })
             layerUpdate.modelRotation = .expression(Exp(.get) { Key.model3DRotation.rawValue })
             layerUpdate.modelType = .constant(.common3d)
-            layerUpdate.slot = .middle
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -504,7 +499,6 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.wallExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.wallExtrusionHeight.rawValue })
-            layerUpdate.slot = .middle
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -517,7 +511,6 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.featureExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.featureExtrusionHeight.rawValue })
-            layerUpdate.slot = .middle
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -997,7 +990,13 @@ class MBRenderer {
     }
 
     private func update2DModel(for model: any MPViewModel) async {
-        if let model2D = model.data[.model2D] as? UIImage, let id = model.model2D?.id, is2dModelsEnabled {
+        // Registered under the feature's `model2dId` *property* rather than the feature's own id: the
+        // property names the shared image, so locations using the same 2D model asset resolve to one atlas
+        // entry instead of one each. The layer's `iconImage` reads the same property, so the two agree.
+        if let model2D = model.data[.model2D] as? UIImage,
+            let id = model.model2D?.properties[.model2dId] as? String,
+            is2dModelsEnabled
+        {
             let imageIdentity = ObjectIdentifier(model2D)
             guard imagesAdded[id] != imageIdentity else { return }
             // A single malformed 2D-model image (e.g. a backend asset that decoded to an invalid

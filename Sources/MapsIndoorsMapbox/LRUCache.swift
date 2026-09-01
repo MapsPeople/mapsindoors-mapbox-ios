@@ -38,6 +38,13 @@ public let LRUCacheMemoryWarningNotification: NSNotification.Name = _notificatio
 
 #endif
 
+// SAFETY: All mutable state (`_values`, `_countLimit`, `_totalCost`,
+// `_totalCostLimit`, `head`, `tail`, `token`, `notificationCenter`) is only
+// read or written inside `atomic { }`, which locks/unlocks `lock` (NSLock)
+// around the body. The intrusive linked-list helpers (`remove`, `append`,
+// `clean`) are documented to be called only inside the lock. Third-party
+// code (nicklockwood/LRUCache, MIT); do not change the synchronization
+// invariants without updating this note.
 public final class LRUCache<Key: Hashable & Sendable, Value>: @unchecked Sendable {
     private var _values: [Key: Container] = [:]
     private var _countLimit: Int
