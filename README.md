@@ -10,8 +10,8 @@ This repository contains the Swift package for the [MapsIndoors with Mapbox Maps
 
 ## Requirements
 
-* Xcode version 15.0 or later
-* An app targeting iOS 14 or later
+* Xcode version 26.0 or later
+* An app targeting iOS 16 or later
 
 
 ## Installation
