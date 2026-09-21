@@ -19,17 +19,73 @@ import MapboxMaps
 ///      must not rely on the default store surviving MapsIndoors cache teardown. If a consumer
 ///      needs isolation, that requires giving MapsIndoors a dedicated `TileStore` (tracked as a
 ///      follow-up), not the shared default.
+///   3. Style packs accumulate across style changes. Each `cacheRegion` persists the style pack
+///      for whatever style it resolves to, and `removeStylePacksIfNoRegionsRemain()` only
+///      reclaims packs once the store holds **zero** tile regions, so a host that switches style
+///      (or flips `useMapsIndoorsStyle`) and re-syncs leaves the previous style's pack on disk
+///      until full teardown. It shows up in the numbers too: the aggregate `cachedRegionSize`
+///      counts the dead pack, while the per-dataset `cachedRegionSize(forRegionIds:)` excludes
+///      style packs entirely, so neither figure lets a host account for it. Bounded by how many
+///      distinct styles a host actually uses, so left as a follow-up, but newly reachable since
+///      SPEX-2553: before that only one style URI was ever requested. Raised in review on !2019.
 final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable {
 
     private let tileStore: TileStore
     private let offlineManager: OfflineManager
+    /// Reads the style URI the map provider is *configured* to render, or `nil` when there is
+    /// no map yet (caching can start before a `MapView` exists) or no injected reader.
+    ///
+    /// Configured, not live: during startup the map briefly shows Mapbox's default style while
+    /// the MapsIndoors style is still loading, and caching in that window must not follow the
+    /// transient value. `MapBoxProvider.styleURIForCaching` carries that reasoning; see
+    /// ``resolvedStyleSource(for:)`` for why it is asked at cache time rather than stored.
+    private let configuredStyleURI: (@MainActor @Sendable () -> String?)?
 
-    init(tileStore: TileStore = .default, offlineManager: OfflineManager = OfflineManager()) {
+    init(
+        tileStore: TileStore = .default,
+        offlineManager: OfflineManager = OfflineManager(),
+        configuredStyleURI: (@MainActor @Sendable () -> String?)? = nil
+    ) {
         self.tileStore = tileStore
         self.offlineManager = offlineManager
+        self.configuredStyleURI = configuredStyleURI
+    }
+
+    /// The style whose tiles and style pack should actually be cached.
+    ///
+    /// `MapsIndoorsCore` has no idea which style the map is rendering — it always asks for
+    /// ``MPMapboxStyleSource/mapsIndoorsDefault``, meaning "whatever style the SDK is set up
+    /// with". Resolving that here, against the style the provider is configured with, is what
+    /// stops the cache diverging from what is on screen: an app that sets its own style (`useMapsIndoorsStyle = false`,
+    /// or Flutter's `MapsIndoorsWidget.mapStyleUri`) otherwise cached the MapsIndoors style's
+    /// resources and went blank offline — with no error, because caching genuinely succeeded.
+    ///
+    /// Deriving beats asking the caller to declare the style separately: there is no second
+    /// value to keep in sync, so the mismatch cannot be reintroduced by forgetting to update
+    /// one of them.
+    ///
+    /// Read at cache time rather than captured at registration because the host can change
+    /// the style at any point after the provider is registered in `MapBoxProvider.init`.
+    ///
+    /// An explicit ``MPMapboxStyleSource/custom(styleURI:)`` from the caller is honoured as
+    /// given — only the "use the SDK's style" request is resolved.
+    @MainActor
+    func resolvedStyleSource(for requested: MPMapboxStyleSource) -> MPMapboxStyleSource {
+        guard case .mapsIndoorsDefault = requested else { return requested }
+        guard
+            let configured = configuredStyleURI?(),
+            configured != Constants.Style.mapsIndoorsDefaultURI,
+            let url = URL(string: configured)
+        else {
+            // No map yet, no reader, or the provider really is set to the MapsIndoors style.
+            return requested
+        }
+        return .custom(styleURI: url)
     }
 
     // MARK: - MapProviderBaseMapCache
+
+    let supportsBaseMapCaching = true
 
     func cacheRegion(
         bounds: MPGeoBounds,
@@ -38,12 +94,16 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         id: String,
         styleSource: MPMapboxStyleSource
     ) async throws {
+        // Resolve against the live map first, so everything below caches the style that is
+        // actually being rendered rather than the one Core assumed (see resolvedStyleSource).
+        let effectiveSource = await resolvedStyleSource(for: styleSource)
+
         // Persist the style pack for the style the map actually loads (the MapsIndoors
         // wrapper style, or a consumer's custom style) so its style JSON / sprites /
         // glyphs — and the resources of any style it imports — are available on a cold
         // offline launch. The base-map *tiles* are cached separately below, from the base
         // map's own style (see makeDescriptors).
-        try await loadStylePack(for: mapStyleURI(for: styleSource))
+        try await loadStylePack(for: mapStyleURI(for: effectiveSource))
 
         // Hold the Cancelable so a cancelled enclosing Task stops the in-flight
         // download instead of letting it run to completion (network + battery).
@@ -54,7 +114,7 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
                 // runOnOwningActor). The load is async; its completion is delivered on a
                 // TileStore worker thread, which is fine.
                 self.runOnOwningActor {
-                    let descriptors = self.makeDescriptors(for: styleSource, minZoom: minZoom, maxZoom: maxZoom)
+                    let descriptors = self.makeDescriptors(for: effectiveSource, minZoom: minZoom, maxZoom: maxZoom)
                     guard let loadOptions = TileRegionLoadOptions(
                         geometry: self.polygonGeometry(for: bounds),
                         descriptors: descriptors,
@@ -78,6 +138,61 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
             // load-request failure delivered through the completion above), cancelling the
             // Cancelable makes loadTileRegion invoke the completion with `.failure(.canceled)`,
             // which resumes the continuation. So this throws rather than hanging.
+            cancelable.cancel()
+        }
+    }
+
+    func estimateRegion(
+        bounds: MPGeoBounds,
+        minZoom: Double,
+        maxZoom: Double,
+        id: String,
+        styleSource: MPMapboxStyleSource
+    ) async throws -> MPBaseMapSizeEstimate {
+        // Deliberately no `loadStylePack` counterpart: the provider exposes no way to estimate
+        // a style pack, and calling the real loader here would download it as a side effect of
+        // asking a question. The style-pack bytes are therefore outside this figure — the same
+        // exclusion `cachedRegionSize(forRegionIds:)` makes, so estimate and recorded size stay
+        // comparable.
+        let cancelable = LockedCancelable()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<MPBaseMapSizeEstimate, Error>) in
+                self.runOnOwningActor {
+                    // The same descriptors and geometry the real download builds, so the
+                    // estimate covers the actual request rather than an approximation.
+                    let descriptors = self.makeDescriptors(for: styleSource, minZoom: minZoom, maxZoom: maxZoom)
+                    guard let loadOptions = TileRegionLoadOptions(
+                        geometry: self.polygonGeometry(for: bounds),
+                        descriptors: descriptors,
+                        acceptExpired: false
+                    ) else {
+                        continuation.resume(throwing: MPError.unknownError)
+                        return
+                    }
+                    let cancel = self.tileStore.estimateTileRegion(
+                        forId: id,
+                        loadOptions: loadOptions,
+                        // nil → the provider's default accuracy and timeouts.
+                        estimateOptions: nil,
+                        progress: { _ in }
+                    ) { result in
+                        switch result {
+                        case .success(let estimate):
+                            continuation.resume(returning: MPBaseMapSizeEstimate(
+                                transferSize: estimate.transferSize,
+                                storageSize: estimate.storageSize,
+                                errorMargin: estimate.errorMargin))
+                        case .failure(let error):
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                    cancelable.set(cancel)
+                }
+            }
+        } onCancel: {
+            // As in cacheRegion: cancelling reports through the same TileRegionError.canceled
+            // ("The operation was canceled"), delivered to the completion above, so the
+            // continuation resumes by throwing rather than hanging.
             cancelable.cancel()
         }
     }
@@ -225,13 +340,31 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     /// The style the map actually loads for this source: the MapsIndoors wrapper style
     /// (which imports the Mapbox Standard base map as the "basemap" import), or a
     /// consumer-provided custom style.
-    private func mapStyleURI(for source: MPMapboxStyleSource) -> StyleURI {
+    func mapStyleURI(for source: MPMapboxStyleSource) -> StyleURI {
         switch source {
         case .mapsIndoorsDefault:
             return StyleURI(rawValue: Constants.Style.mapsIndoorsDefaultURI) ?? .standard
         case .custom(let url):
             return StyleURI(url: url) ?? .standard
         }
+    }
+
+    /// The integer zoom range `TilesetDescriptorOptions` is built from.
+    ///
+    /// `TilesetDescriptorOptions` requires `UInt8` zoom values, so the `Double` bounds of the
+    /// provider seam have to be clamped to Mapbox's `[0, 22]` and rounded. The lower bound
+    /// rounds **down** and the upper bound **up** so a fractional request is covered in full
+    /// rather than silently trimmed at either end. The `max(lo, hi)` guards an inverted
+    /// request (`minZoom > maxZoom`), which would otherwise trap forming the range.
+    ///
+    /// Split out of ``makeDescriptors(for:minZoom:maxZoom:)`` so the arithmetic can be tested
+    /// at its own granularity: a descriptor-level test can only observe the zoom range
+    /// indirectly, through opaque `TilesetDescriptor` values, so the clamp and the rounding
+    /// direction are far easier to pin down here.
+    static func zoomRange(minZoom: Double, maxZoom: Double) -> ClosedRange<UInt8> {
+        let lo = UInt8(min(max(minZoom, 0), 22).rounded(.down))
+        let hi = UInt8(min(max(maxZoom, 0), 22).rounded(.up))
+        return lo...(max(lo, hi))
     }
 
     /// The tileset descriptors whose tile packs must be cached for the base map to render
@@ -243,17 +376,18 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     /// the base map blank offline — the imported Standard style has to be cached directly.
     /// A custom style may additionally declare its own first-party sources, so it is cached
     /// alongside Standard.
-    private func makeDescriptors(
+    ///
+    /// Note that Standard is appended unconditionally, which is right for any style that
+    /// imports it (the MapsIndoors style does, and it was the only possibility before
+    /// SPEX-2553) but not a certainty any more: a host style that does *not* import Standard
+    /// still gets Standard's tilesets downloaded, which it will never draw. Wasted bytes
+    /// rather than a wrong render, so it is recorded here rather than fixed.
+    func makeDescriptors(
         for source: MPMapboxStyleSource,
         minZoom: Double,
         maxZoom: Double
     ) -> [TilesetDescriptor] {
-        // TilesetDescriptorOptions requires UInt8 zoom values — clamp to [0, 22].
-        // Round the lower bound down and the upper bound up so the full requested
-        // zoom range is covered rather than silently trimmed.
-        let lo = UInt8(min(max(minZoom, 0), 22).rounded(.down))
-        let hi = UInt8(min(max(maxZoom, 0), 22).rounded(.up))
-        let zoomRange = lo...(max(lo, hi))
+        let zoomRange = Self.zoomRange(minZoom: minZoom, maxZoom: maxZoom)
         let stylePackOptions = StylePackLoadOptions(
             glyphsRasterizationMode: .ideographsRasterizedLocally,
             metadata: nil,
@@ -268,7 +402,12 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         let mapStyle = mapStyleURI(for: source).rawValue
 
         var styleURIs: [StyleURI] = [.standard]
-        if case .custom(let url) = source, let custom = StyleURI(url: url) {
+        // Skip a custom style that *is* Standard. Since SPEX-2553 the source can be resolved
+        // from the live map, and a host that never set a style of its own leaves the map on
+        // Standard — which would otherwise append a second, identical descriptor here.
+        if case .custom(let url) = source, let custom = StyleURI(url: url),
+            custom.rawValue != StyleURI.standard.rawValue
+        {
             styleURIs.append(custom)
         }
         return styleURIs.map { uri in
@@ -326,7 +465,9 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
 /// assigns the `Cancelable`) and the task-cancellation handler (which cancels it)
 /// can run on different threads, and cancellation may arrive before the operation
 /// starts — in which case the eventual `set` cancels immediately.
-private final class LockedCancelable: @unchecked Sendable {
+///
+/// Internal rather than private so that ordering is unit-testable.
+final class LockedCancelable: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelable: Cancelable?
     private var cancelled = false

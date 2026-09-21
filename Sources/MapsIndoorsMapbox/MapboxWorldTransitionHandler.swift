@@ -32,12 +32,21 @@ class MapboxWorldTransitionHandler {
     //    Standard style does not honour buildingsOpacity offline).
     //  - auto (default): buildingsOpacity when online, show3dObjects when offline — full
     //    experience online, graceful degradation offline.
+    // The raw values are the wire format: outside callers write the bare integer into
+    // `buildingHideModeDefaultsKey`, so renumbering a case silently selects a different
+    // mechanism. `test_buildingHideModeRawValues_matchTheWireContract` pins them.
     enum BuildingHideMode: Int { case auto = 0, buildingsOpacity = 1, show3dObjects = 2 }
 
     // Optional override, read live from UserDefaults. Absent/0 → auto. Primarily a test/QA seam;
     // observers re-apply on `buildingHideModeChanged` so a change takes effect immediately.
-    static let buildingHideModeDefaultsKey = "pp.debug.buildingHideMode"
-    static let buildingHideModeChanged = Notification.Name("pp.debug.buildingHideModeChanged")
+    //
+    // Namespaced to the SDK rather than to a sample app: this lever ships, is not compiled out, and
+    // both constants are internal to this module — so the literal strings are the entire contract
+    // for anyone outside it, whether that is support, QA, or a host app. A rename therefore breaks
+    // callers with no compile error, which is why `test_buildingHideModeKeys_areNamespacedToTheSDK`
+    // pins both of them.
+    static let buildingHideModeDefaultsKey = "com.mapspeople.mapsindoors.debug.buildingHideMode"
+    static let buildingHideModeChanged = Notification.Name("com.mapspeople.mapsindoors.debug.buildingHideModeChanged")
 
     /// Whether to hide buildings via the binary `show3dObjects` right now — honours the override,
     /// and in `auto` falls back to `show3dObjects` only when offline.

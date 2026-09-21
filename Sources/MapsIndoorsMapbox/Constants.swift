@@ -54,9 +54,12 @@ enum Constants {
     }
 
     enum Style {
-        /// The MapsIndoors-managed Mapbox style rendered by `MapBoxProvider` and
-        /// cached by `MBBaseMapCacheProvider`. Single source of truth so the
-        /// cached tiles can never diverge from the style being rendered.
+        /// The MapsIndoors-managed Mapbox style `MapBoxProvider` renders by default.
+        ///
+        /// `MBBaseMapCacheProvider` compares the live style against this to decide whether
+        /// the map is still on the MapsIndoors style or the host has replaced it; that
+        /// comparison, not this constant alone, is what keeps the cached tiles from
+        /// diverging from what is rendered (see `resolvedStyleSource(for:)`).
         static let mapsIndoorsDefaultURI = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
     }
 }

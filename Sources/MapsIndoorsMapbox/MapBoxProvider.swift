@@ -2,6 +2,7 @@ import Foundation
 import MapboxMaps
 @_spi(Private) import MapsIndoors
 @_spi(Private) import MapsIndoorsCore
+import os
 
 /// Test seam over the single `MapboxMap.loadStyle` call `_loadMapbox()` makes.
 /// Tests inject a fake to drive the completion — including firing it more than
@@ -17,9 +18,42 @@ extension MapboxMap: MBStyleLoading {
     }
 }
 
-// SAFETY: (SPEX-1975) MapBoxProvider wraps main-thread-only Mapbox UI and is only ever
-// accessed on the main actor, so it is safe to share by that convention. (MPMapProvider is Sendable;
-// the type-system proof is deferred with the wider provider-isolation work.)
+// SAFETY: (SPEX-1975) MapBoxProvider wraps main-thread-only Mapbox UI and is accessed on the main
+// actor, so it is safe to share by that convention. (MPMapProvider is Sendable; the type-system
+// proof is deferred with the wider provider-isolation work.)
+//
+// Two public setters are the exception, and are safe by construction rather than by that
+// convention. `hideMapboxLogo` is written through `MPMapConfig.setHideMapboxLogo`, a non-isolated
+// `@objc` API, and `padding` through a public, non-isolated property; a host can call either from
+// any thread and isolation cannot be enforced statically against them, so an off-main write must
+// not trap. Both are lock-backed rather than relying on this convention, because both are read on the
+// main actor while being written from anywhere: `padding` by `adjustOrnaments()` and
+// `MBCameraOperator`, `hideMapboxLogo` by `adjustOrnaments()` and `mapsPeopleLogoPosition`.
+//
+// They differ in how the ornament pass is scheduled. `padding` runs it synchronously when the
+// write is already on the main actor, because the SDK's own writer pairs it with a logo-constraint
+// move in the same turn; `hideMapboxLogo` always defers, like its deferring siblings, because
+// nothing is paired with it. (That set is not the same four named below — it includes
+// `enableNativeMapBuildings`, which has no off-main write path, and excludes `useMapsIndoorsStyle`,
+// which has one but no `didSet`.)
+//
+// Those two are the only *synchronized* properties here, which is narrower than the exposure — do
+// not read this block as saying the rest of the class is race-free. `transitionLevel`,
+// `showMapboxMapMarkers`, `showMapboxRoadLabels` and `useMapsIndoorsStyle` are written through the
+// same non-isolated `@objc extension MPMapConfig`, so they carry the identical off-main write
+// exposure and are knowingly left unsynchronized — and nothing traps to reveal it: three defer via
+// `Task { @MainActor }`, and `useMapsIndoorsStyle` is a bare store with no `didSet` at all. Their
+// reads differ: the two `showMapbox*` flags are read by the
+// `@MainActor` `MapboxWorldTransitionHandler`, `useMapsIndoorsStyle` within this class, and
+// `transitionLevel` by `MBTileProvider`, which is not main-actor isolated at all — so that one can
+// be off-main at both ends. None will tear in practice, being an `Int`, a `Bool` and two `Bool?`s,
+// but that is a platform accident rather than a guarantee. A follow-up ticket carries them; they
+// were left alone here rather than widening a two-setter crash fix into six locks.
+//
+// Every other property is written only by `MPMapControlInternal`, which is `@MainActor`, so those
+// keep the convention in practice. Nothing enforces that either — `MPMapConfig.mapProvider` is
+// public, so a host can reach this object off-main — so anything added here should say which of the
+// three groups it belongs to rather than assuming the convention holds.
 public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public let model2DResolutionLimit = 500
 
@@ -87,16 +121,40 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         }
     }
 
+    private let _hideMapboxLogo = OSAllocatedUnfairLock(initialState: false)
+
     /// Controls visibility of the Mapbox logo (watermark).
     /// `false` (the default, matching the Android SDK's `hideMapboxLogo`
     /// builder option) shows the Mapbox logo in its default slot; `true`
     /// suppresses it and lets the MapsPeople branding logo take over the
-    /// bottom-left watermark slot. Re-applies on the main actor because
-    /// `adjustOrnaments()` touches UIKit ornament views.
-    public var hideMapboxLogo: Bool = false {
-        didSet {
-            guard oldValue != hideMapboxLogo else { return }
-            MainActor.assumeIsolated { adjustOrnaments() }
+    /// bottom-left watermark slot.
+    ///
+    /// Hops to the main actor asynchronously rather than asserting it, because the write can arrive
+    /// from any thread: `MPMapConfig.setHideMapboxLogo` is a non-isolated `@objc` API, so a host app
+    /// calling it off the main thread would otherwise hit a precondition failure inside
+    /// `assumeIsolated`. Matches `showMapboxMapMarkers` above. The consequence is that
+    /// `adjustOrnaments()` lands on a later main-actor turn, which is invisible here: nothing reads
+    /// ornament state synchronously after the write, and `mapsPeopleLogoPosition` derives from the
+    /// stored flag rather than from the views.
+    public var hideMapboxLogo: Bool {
+        get { _hideMapboxLogo.withLock { $0 } }
+        set {
+            // Synchronized for the same reason as `padding` below: the write arrives from an
+            // `@objc` API that a host can call off the main thread, while `adjustOrnaments()` and
+            // `mapsPeopleLogoPosition` read it on the main actor. A `Bool` will not tear on any
+            // platform we ship, but an unsynchronized cross-thread access is still a data race by
+            // the language's rules and by ThreadSanitizer's.
+            //
+            // The deferral stays unconditional, unlike `padding`: nothing is paired with this write
+            // in the same turn, so there is no lag to remove, and this keeps the shape its four
+            // sibling setters use.
+            let changed = _hideMapboxLogo.withLock { current -> Bool in
+                guard current != newValue else { return false }
+                current = newValue
+                return true
+            }
+            guard changed else { return }
+            Task { @MainActor [weak self] in self?.adjustOrnaments() }
         }
     }
 
@@ -145,12 +203,43 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// logo moves to the bottom-right so the two logos don't collide.
     public var mapsPeopleLogoPosition: MPMapsPeopleLogoPosition { hideMapboxLogo ? .bottomLeft : .bottomRight }
 
-    public var padding: UIEdgeInsets = .zero {
-        // `padding` is set from `MPMapControlInternal` on the main
-        // thread — UIKit anyway — but the setter has no isolation in
-        // its signature, so assert before hopping into the
-        // @MainActor-only `adjustOrnaments()`.
-        didSet { MainActor.assumeIsolated { adjustOrnaments() } }
+    private let _padding = OSAllocatedUnfairLock(initialState: UIEdgeInsets.zero)
+
+    /// Synchronized rather than main-actor-only, unlike the rest of this class.
+    ///
+    /// The SDK's own writer (`MPMapControlInternal.mapPadding`) is `@MainActor`, but this is a
+    /// `public var` on a public class with no isolation in its signature, so a host can write it
+    /// from any thread. Asserting the main actor here trapped instead of hopping, which is the
+    /// crash this fixes — but simply hopping the *side effect* would have left a 32-byte
+    /// `UIEdgeInsets` being stored off-main while `adjustOrnaments()` and `MBCameraOperator` read
+    /// it on the main actor, i.e. an unsynchronized read/write that can tear. The lock removes
+    /// that rather than relying on the class-wide "main actor only" convention, which this
+    /// property no longer satisfies.
+    public var padding: UIEdgeInsets {
+        get { _padding.withLock { $0 } }
+        set {
+            // Compare and store under the same lock: two racing writers cannot both observe a
+            // change and schedule redundant work, and the guard matches the four sibling setters.
+            let changed = _padding.withLock { current -> Bool in
+                guard current != newValue else { return false }
+                current = newValue
+                return true
+            }
+            guard changed else { return }
+
+            // Synchronously when the write is already on the main actor, deferred only when it is
+            // not. `MPMapControlInternal.mapPadding` writes this and then moves the MapsPeople logo
+            // constraint in the same turn, so deferring unconditionally made the Mapbox ornaments
+            // lag that logo by one turn on every padding change — and a write inside a
+            // `UIView.animate` block left the ornament move outside the animation. Hosts drive
+            // padding during bottom-sheet drags, so that is a visible regression, not a theoretical
+            // one. Off-main is the case that used to trap, and is the only one that defers.
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { adjustOrnaments() }
+            } else {
+                Task { @MainActor [weak self] in self?.adjustOrnaments() }
+            }
+        }
     }
 
     public var mpAccessibilityElementsHidden: Bool = false
@@ -160,6 +249,11 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public var positionPresenter: MPPositionPresenter
 
     public var collisionHandling: MPCollisionHandling = .allowOverLap
+
+    /// Set this through ``MPMapControl/expandedTapAreaEnabled``, not here: the render path re-applies
+    /// the map control's value, so a write straight to the provider is silently reverted on the next
+    /// render. Public for the same reason as `collisionHandling` above — the protocol requires it.
+    public var expandedTapAreaEnabled: Bool = true
 
     public var routeRenderer: MPRouteRenderer {
         _routeRenderer ?? MBRouteRenderer(mapView: mapView)
@@ -251,6 +345,9 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             // silently racing on UIKit state.
             MainActor.assumeIsolated {
                 self?.adjustOrnaments()
+                // Remember what the map settled on, so base-map caching still knows the host's
+                // style after the map view is gone (see `styleURIForCaching`).
+                self?.rememberLoadedStyleURI()
             }
             // A style (re)load resets every style-import config back to its
             // defaults, so re-apply the MapsIndoors-vs-Mapbox world visibility
@@ -277,6 +374,10 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         // scheduled (SPEX-1786).
         MainActor.assumeIsolated {
             adjustOrnaments()
+            // Same reason, for the same observer: the map may already be on a style by now, and
+            // `lastLoadedStyleURI` would otherwise stay nil until the *next* load - which for a
+            // host-owned style may never come.
+            rememberLoadedStyleURI()
         }
 
         Task { [weak self] in
@@ -285,10 +386,79 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
 
         registerLocalFallbackFontWith(filenameString: "OpenSans-Bold.ttf", bundleIdentifierString: "Fonts")
 
-        MPMapsIndoors.baseMapCacheProvider = MBBaseMapCacheProvider()
+        // Hand the cache provider a reader for the style rather than a fixed URI: the host can
+        // set its own style at any point after this, and the cache has to follow it or the map
+        // goes blank offline (SPEX-2553).
+        MPMapsIndoors.baseMapCacheProvider = MBBaseMapCacheProvider(
+            configuredStyleURI: { [weak self] in self?.styleURIForCaching })
     }
 
     private let styleUrl = Constants.Style.mapsIndoorsDefaultURI
+
+    /// The style URI the map most recently finished loading, or `nil` before the first load.
+    ///
+    /// Exists because `mapView` is `weak`: once the host tears its map down there is nothing
+    /// left to ask, and with `useMapsIndoorsStyle == false` the fallback would otherwise be the
+    /// MapsIndoors style, the one style we know for certain is *not* what was rendered. That is
+    /// reachable mid-sync rather than only at teardown, since base-map caching is long-running:
+    /// a host that starts it and navigates away would get the first N regions cached against
+    /// its own style and the rest against the MapsIndoors style. Raised in review on !2019.
+    @MainActor
+    private var lastLoadedStyleURI: String?
+
+    /// Records the map's current style. Called from the `onStyleLoaded` observer, which is the
+    /// point at which the map has actually settled on a style.
+    @MainActor
+    private func rememberLoadedStyleURI() {
+        if let uri = mapView?.mapboxMap.styleURI?.rawValue {
+            lastLoadedStyleURI = uri
+        }
+    }
+
+    /// The style base-map caching should target — the style this provider is *configured* to
+    /// render, which is not always the style the map is showing at the moment it is asked.
+    ///
+    /// Reporting the map's live `styleURI` instead would be wrong during startup: `MapView.init`
+    /// begins loading Mapbox's own default style, and the MapsIndoors style only replaces it
+    /// when `loadMapsIndoorsStyleResumingOnce()` completes inside `_loadMapbox()`. A host that
+    /// starts caching in that window would read the transient default and cache its style pack
+    /// instead of the MapsIndoors style that appears moments later — offline, the map would
+    /// then come up without the style it actually renders. Raised by review on !2019.
+    ///
+    /// Answering from configuration removes that window rather than narrowing it: while
+    /// ``useMapsIndoorsStyle`` is set, the SDK loads its own style over whatever is showing, so
+    /// that is the style to cache no matter what the map is displaying right now. Only when the
+    /// host has taken the style over does the live value become the authoritative answer — and
+    /// then there is no transient phase, because the SDK never loads a style at all
+    /// (see `_loadMapbox()`).
+    @MainActor
+    var styleURIForCaching: String? {
+        Self.styleURIForCaching(
+            useMapsIndoorsStyle: useMapsIndoorsStyle,
+            mapsIndoorsStyleURI: styleUrl,
+            currentStyleURI: mapView?.mapboxMap.styleURI?.rawValue,
+            lastLoadedStyleURI: lastLoadedStyleURI)
+    }
+
+    /// The decision itself, split from the state it reads so it can be unit-tested across all
+    /// four combinations. Exercising it through the property would mean deallocating a live
+    /// `MapView` mid-test to reach the torn-down case, which destabilises the test host for no
+    /// extra coverage - the same trade-off as ``MBBaseMapCacheProvider/zoomRange(minZoom:maxZoom:)``.
+    ///
+    /// `lastLoadedStyleURI` backstops a torn-down map, and is only consulted when the host owns
+    /// the style: under `useMapsIndoorsStyle` the answer is a constant anyway. A map that never
+    /// loaded a style has nothing remembered, so this returns `nil` and the caller's "no map
+    /// yet" fallback to the MapsIndoors style still applies.
+    @MainActor
+    static func styleURIForCaching(
+        useMapsIndoorsStyle: Bool,
+        mapsIndoorsStyleURI: String,
+        currentStyleURI: String?,
+        lastLoadedStyleURI: String?
+    ) -> String? {
+        guard !useMapsIndoorsStyle else { return mapsIndoorsStyleURI }
+        return currentStyleURI ?? lastLoadedStyleURI
+    }
 
     private var cameraChangedCancellable: AnyCancelable? = nil
     private var cameraIdleCancellable: AnyCancelable? = nil
@@ -477,15 +647,9 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
                 Constants.LayerIDs.featureExtrusionLayer,
             ], filter: nil)
 
-        // Tolerance rect: catches bottom-anchored / small icons whose visual
-        // offset leaves nothing exactly under the finger (the SPEX-1611
-        // "markers sometimes not clickable" fix). 22pt ≈ Apple's 44pt target.
-        let tapTolerance: CGFloat = 22
-        let tapRect = CGRect(
-            x: screenPoint.x - tapTolerance,
-            y: screenPoint.y - tapTolerance,
-            width: tapTolerance * 2,
-            height: tapTolerance * 2)
+        // Tolerance rect for pass 2, or nil when the host app has opted out of the expanded tap
+        // area — in which case a tap has to land on the feature itself.
+        let tapRect = Self.tapQueryRect(around: screenPoint, expanded: expandedTapAreaEnabled)
 
         let coordinateFallback: () -> Void = { [weak self] in
             guard let self, let coordinate = self.mapView?.mapboxMap.coordinate(for: screenPoint) else { return }
@@ -501,13 +665,42 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             guard let self else { return }
             if case .success(let features) = pointResult, self.dispatchTap(features, screenPoint: screenPoint, map: mapboxMap) { return }
 
-            // Pass 2: widen to the tolerance rect (preserves the SPEX-1611 fix).
+            // Pass 2: widen to the tolerance rect (preserves the SPEX-1611 fix). Absent when the
+            // expanded tap area is disabled, so an off-target tap reports a bare coordinate.
+            guard let tapRect else {
+                coordinateFallback()
+                return
+            }
             mapboxMap.queryRenderedFeatures(with: tapRect, options: queryOptions) { [weak self] rectResult in
                 guard let self else { return }
                 if case .success(let features) = rectResult, self.dispatchTap(features, screenPoint: screenPoint, map: mapboxMap) { return }
                 coordinateFallback()
             }
         }
+    }
+
+    /// Screen-space padding added around a tap before re-querying, in points.
+    /// 22pt is half of Apple's 44pt minimum touch target.
+    static let tapTolerance: CGFloat = 22
+
+    /// The rect to re-query when nothing was found directly under the finger, or `nil` when the
+    /// expanded tap area is disabled.
+    ///
+    /// Centred on the tap and `tapTolerance` in every direction. Reaching *up* is what makes a
+    /// bottom-anchored icon tappable at all, since such an icon renders above its coordinate and can
+    /// leave nothing under the finger (SPEX-1611). The rect is symmetric, so it reaches equally far
+    /// *down* — which is why a map with large, densely placed icons may want it off: there, a tap in
+    /// open space can still land within tolerance of an icon drawn above it.
+    ///
+    /// Extracted so both the geometry and the opt-out are unit-testable without a live map; see
+    /// `MapBoxProviderTapToleranceTests`.
+    static func tapQueryRect(around point: CGPoint, expanded: Bool) -> CGRect? {
+        guard expanded else { return nil }
+        return CGRect(
+            x: point.x - tapTolerance,
+            y: point.y - tapTolerance,
+            width: tapTolerance * 2,
+            height: tapTolerance * 2)
     }
 
     /// A tap candidate reduced to the only fields the selection ranking needs.
@@ -521,6 +714,29 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         let screenDistance: CGFloat
     }
 
+    /// How far a marker may sit from its own coordinate and still count as a direct hit, when the
+    /// expanded tap area is off.
+    ///
+    /// `configureMarkerLayer` gives the marker layers a `textField`, so a floating label is part of
+    /// the same symbol as its icon and a rendered query returns the marker for a tap on the text.
+    /// Measured on Temple Square: icon taps report 11-33pt, label taps 66-136pt.
+    ///
+    /// Assumes an icon drawn within 44pt of its coordinate. Icon size and anchor come from the
+    /// display rule, so a solution with larger bottom-anchored icons will lose taps near the top of
+    /// its own icons while opted out. Deriving the bound from icon size is not possible today —
+    /// size is not among the feature properties.
+    static var directHitTolerance: CGFloat { tapTolerance * 2 }
+
+    /// The marker bound for a tap, or `nil` while the expanded tap area is on.
+    ///
+    /// Extracted for the same reason as `tapQueryRect(around:expanded:)`: it puts the step from the
+    /// public flag to the bound under test, which a device pass would otherwise be the only thing
+    /// covering. `dispatchTap` as a whole stays untestable — `QueriedRenderedFeature` has no public
+    /// initialiser — but this part of it does not have to.
+    static func markerDistanceCap(expanded: Bool) -> CGFloat? {
+        expanded ? nil : directHitTolerance
+    }
+
     /// Index of the candidate a tap should select: among clickable, identified
     /// candidates, the nearest marker — the icon the user aims at — otherwise
     /// the nearest candidate of any kind. `nil` if none qualify.
@@ -530,8 +746,31 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// selected an arbitrary neighbouring room when several fell inside the
     /// tolerance rect (zoomed out / pitched) — SPEX-1903. Ranking by screen
     /// distance makes the room actually under the finger win.
-    static func selectedCandidateIndex(_ candidates: [TapCandidate]) -> Int? {
-        let eligible = candidates.indices.filter { candidates[$0].clickable && candidates[$0].id != nil }
+    ///
+    /// - Parameter maxMarkerDistance: when set, a **marker** further than this from the tap is
+    ///   discarded before ranking.
+    ///
+    ///   Markers only: a rendered query returns a feature whose drawn form covers the tap, so for a
+    ///   room or a model that form *is* the location and the distance means nothing. Only a marker
+    ///   is ambiguous, because its icon and label are one symbol.
+    ///
+    ///   A discarded marker does not consume the tap — `markers` empties, the pool falls back to
+    ///   the non-markers, and the tap selects what is drawn underneath (indoors, usually the room
+    ///   the label overhangs). Deliberate: the alternative puts a silent dead zone wherever a label
+    ///   crosses a feature. An earlier revision that bound every point geometry showed the cost —
+    ///   tapping a building discarded its only candidate and selected nothing. Pinned by
+    ///   `labelFallsThroughToRoom` and `labelFallsThroughToModel`.
+    ///
+    ///   Route pins are never bound: `createRouteMarkerViewModel` never sets `.type`, so they
+    ///   resolve to `.undefined`. Kept that way — see the comment there.
+    static func selectedCandidateIndex(
+        _ candidates: [TapCandidate], maxMarkerDistance: CGFloat? = nil
+    ) -> Int? {
+        let eligible = candidates.indices.filter {
+            guard candidates[$0].clickable, candidates[$0].id != nil else { return false }
+            guard let cap = maxMarkerDistance, candidates[$0].isMarker else { return true }
+            return candidates[$0].screenDistance <= cap
+        }
         let markers = eligible.filter { candidates[$0].isMarker }
         let pool = markers.isEmpty ? eligible : markers
         return pool.min { candidates[$0].screenDistance < candidates[$1].screenDistance }
@@ -554,7 +793,10 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
                 screenDistance: screenDistance(of: result.queriedFeature.feature, to: screenPoint, map: map))
         }
 
-        guard let index = Self.selectedCandidateIndex(candidates) else { return false }
+        guard
+            let index = Self.selectedCandidateIndex(
+                candidates, maxMarkerDistance: Self.markerDistanceCap(expanded: expandedTapAreaEnabled))
+        else { return false }
         let result = features[index]
         guard case .string(let idString)? = result.queriedFeature.feature.identifier else { return false }
 
