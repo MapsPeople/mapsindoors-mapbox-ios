@@ -114,7 +114,9 @@ final class RouteLineAnimator {
         // invalidated on main before dealloc; this is the safety net if the last reference is released off-main
         // (e.g. during teardown) — dispatch the invalidate to main so it is always safe. Capturing only `link`
         // (never `self`, which is deallocating) avoids resurrection.
-        let link = displayLink
+        // `nonisolated(unsafe)`: CADisplayLink is a main-thread object and the only thing done with it here is
+        // to invalidate it on main; the capture is the hand-off, not a share.
+        nonisolated(unsafe) let link = displayLink
         if Thread.isMainThread {
             link?.invalidate()
         } else {

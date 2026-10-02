@@ -1,5 +1,5 @@
 import Foundation
-import MapboxMaps
+@preconcurrency import MapboxMaps
 @_spi(Private) import MapsIndoors
 @_spi(Private) import MapsIndoorsCore
 import os
@@ -22,40 +22,53 @@ extension MapboxMap: MBStyleLoading {
 // actor, so it is safe to share by that convention. (MPMapProvider is Sendable; the type-system
 // proof is deferred with the wider provider-isolation work.)
 //
-// Two public setters are the exception, and are safe by construction rather than by that
-// convention. `hideMapboxLogo` is written through `MPMapConfig.setHideMapboxLogo`, a non-isolated
-// `@objc` API, and `padding` through a public, non-isolated property; a host can call either from
-// any thread and isolation cannot be enforced statically against them, so an off-main write must
-// not trap. Both are lock-backed rather than relying on this convention, because both are read on the
-// main actor while being written from anywhere: `padding` by `adjustOrnaments()` and
-// `MBCameraOperator`, `hideMapboxLogo` by `adjustOrnaments()` and `mapsPeopleLogoPosition`.
+// Six public properties are the exception, and are safe by construction rather than by that
+// convention: `hideMapboxLogo`, `padding`, `transitionLevel`, `showMapboxMapMarkers`,
+// `showMapboxRoadLabels` and `useMapsIndoorsStyle`. Each is written through a non-isolated public
+// API — five through the `@objc extension MPMapConfig` setters, `padding` through a public,
+// non-isolated property — so a host can write it from any thread and isolation cannot be enforced
+// statically against them. Each is also read elsewhere: `padding` and `hideMapboxLogo` by
+// `adjustOrnaments()`, plus `MBCameraOperator` and `mapsPeopleLogoPosition` respectively; the two
+// `showMapbox*` flags by the `@MainActor` `MapboxWorldTransitionHandler`; `useMapsIndoorsStyle`
+// within this class; and `transitionLevel` by `MBTileProvider`, which carries no isolation at all,
+// so that one can be off-main at both ends.
 //
-// They differ in how the ornament pass is scheduled. `padding` runs it synchronously when the
-// write is already on the main actor, because the SDK's own writer pairs it with a logo-constraint
-// move in the same turn; `hideMapboxLogo` always defers, like its deferring siblings, because
-// nothing is paired with it. (That set is not the same four named below — it includes
-// `enableNativeMapBuildings`, which has no off-main write path, and excludes `useMapsIndoorsStyle`,
-// which has one but no `didSet`.)
+// All six are `OSAllocatedUnfairLock`-backed. None of the values would tear on a platform we ship,
+// but an unsynchronized cross-thread access is still a data race by the language's rules and by
+// ThreadSanitizer's — and relying on "it is only an Int" is the argument that has to be re-made
+// every time someone adds a property. The five that schedule follow-up work compare and store under
+// one acquisition, so two racing writers cannot both observe a change and schedule it twice;
+// `useMapsIndoorsStyle` has nothing to schedule and so is a plain locked store.
 //
-// Those two are the only *synchronized* properties here, which is narrower than the exposure — do
-// not read this block as saying the rest of the class is race-free. `transitionLevel`,
-// `showMapboxMapMarkers`, `showMapboxRoadLabels` and `useMapsIndoorsStyle` are written through the
-// same non-isolated `@objc extension MPMapConfig`, so they carry the identical off-main write
-// exposure and are knowingly left unsynchronized — and nothing traps to reveal it: three defer via
-// `Task { @MainActor }`, and `useMapsIndoorsStyle` is a bare store with no `didSet` at all. Their
-// reads differ: the two `showMapbox*` flags are read by the
-// `@MainActor` `MapboxWorldTransitionHandler`, `useMapsIndoorsStyle` within this class, and
-// `transitionLevel` by `MBTileProvider`, which is not main-actor isolated at all — so that one can
-// be off-main at both ends. None will tear in practice, being an `Int`, a `Bool` and two `Bool?`s,
-// but that is a platform accident rather than a guarantee. A follow-up ticket carries them; they
-// were left alone here rather than widening a two-setter crash fix into six locks.
+// They differ only in how the follow-up is scheduled. `padding` runs its ornament pass
+// synchronously when the write is already on the main actor, because `MPMapControlInternal`
+// pairs it with a logo-constraint move in the same turn and deferring made the ornaments lag by
+// one turn on every change; the rest always defer via `Task { @MainActor }`. `useMapsIndoorsStyle`
+// schedules nothing — it is read at the next style load — so it is the lock alone.
 //
 // Every other property is written only by `MPMapControlInternal`, which is `@MainActor`, so those
-// keep the convention in practice. Nothing enforces that either — `MPMapConfig.mapProvider` is
-// public, so a host can reach this object off-main — so anything added here should say which of the
-// three groups it belongs to rather than assuming the convention holds.
+// keep the convention. Nothing enforces that — `MPMapConfig.mapProvider` is public, so a host can
+// reach this object off-main — so anything added here should say which of the two groups it
+// belongs to rather than assuming the convention holds.
 public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public let model2DResolutionLimit = 500
+    public let providerName = "mapbox"
+
+    // SAFETY: a process-wide debug/QA selector, not a per-map setting — a host sets it once and it
+    // applies to every provider, including ones created later, which is why it is static rather than
+    // an instance property. `nonisolated(unsafe)` for the same reason
+    // `MPRoutingProvider.routingServiceType` is: it is written from whatever thread the host happens
+    // to be on, and the value is a plain `Int` enum that cannot tear.
+    //
+    // Typed rather than a `UserDefaults` string key, so renaming or renumbering is a compile error
+    // for every caller instead of a silent revert to `auto`. The re-apply notification stays
+    // internal to this module — this setter posts it, so a caller never names it.
+    @_spi(Private) public static nonisolated(unsafe) var buildingHideMode = MPBuildingHideMode.auto {
+        didSet {
+            guard oldValue != buildingHideMode else { return }
+            NotificationCenter.default.post(name: MapboxWorldTransitionHandler.buildingHideModeChanged, object: nil)
+        }
+    }
 
     public var enableNativeMapBuildings: Bool = true {
         didSet {
@@ -67,10 +80,23 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         }
     }
 
-    public var useMapsIndoorsStyle: Bool = true
+    private let _useMapsIndoorsStyle = OSAllocatedUnfairLock(initialState: true)
+
+    /// Whether the SDK applies its own Mapbox style. Written through
+    /// `MPMapConfig.useMapsIndoorsStyle(value:)`, a non-isolated `@objc` API, and read from the
+    /// `onStyleLoaded` observer and the style-load path — so it carries the same off-main exposure
+    /// as `hideMapboxLogo` and is locked for the same reason.
+    ///
+    /// Unlike its siblings there is no effect to schedule: nothing re-applies when this changes,
+    /// it is read at the next style load. So the lock is the whole change, and there is no
+    /// compare-and-store because there is no work to skip.
+    public var useMapsIndoorsStyle: Bool {
+        get { _useMapsIndoorsStyle.withLock { $0 } }
+        set { _useMapsIndoorsStyle.withLock { $0 = newValue } }
+    }
 
     /// Internal (not `private`) so tests can inject a spy via `@testable import` to
-    /// assert that property didSet observers schedule a visibility re-apply.
+    /// assert that the property setters schedule a visibility re-apply.
     internal var mapboxTransitionHandler: MapboxWorldTransitionHandler?
 
     /// Test injection point for the style loader — when non-nil, the MapsIndoors
@@ -83,38 +109,65 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// never loaded (SPEX-2169).
     internal private(set) var styleLoadFailed = false
 
+    private let _transitionLevel = OSAllocatedUnfairLock(initialState: 17)
+
     /// The zoom level at which the map transitions between Mapbox-centric and
     /// MapsIndoors-centric rendering. Changing it re-applies the world/marker
     /// visibility against the current camera, so `setMapsIndoorsTransitionLevel`
     /// takes effect immediately rather than only once the level is next crossed
     /// by a camera movement (SPEX-2097).
-    public var transitionLevel = 17 {
-        didSet {
-            guard oldValue != transitionLevel else { return }
+    public var transitionLevel: Int {
+        get { _transitionLevel.withLock { $0 } }
+        set {
+            // Compare and store under one acquisition, as `hideMapboxLogo` does: two racing
+            // writers cannot both observe a change and schedule redundant work, which a separate
+            // `guard` before the store would still allow once the store is synchronized.
+            let changed = _transitionLevel.withLock { current -> Bool in
+                guard current != newValue else { return false }
+                current = newValue
+                return true
+            }
+            guard changed else { return }
             Task { @MainActor [weak self] in
                 await self?.mapboxTransitionHandler?.reapplyVisibility()
             }
         }
     }
 
+    private let _showMapboxMapMarkers = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+
     /// Controls visibility of Mapbox base-map POI / place / transit labels.
     /// Only `true` shows them; `nil` (default) and `false` hide them.
     /// Aligned with the Android SDK's default-hidden behavior.
     public var showMapboxMapMarkers: Bool? {
-        didSet {
-            guard oldValue != showMapboxMapMarkers else { return }
+        get { _showMapboxMapMarkers.withLock { $0 } }
+        set {
+            let changed = _showMapboxMapMarkers.withLock { current -> Bool in
+                guard current != newValue else { return false }
+                current = newValue
+                return true
+            }
+            guard changed else { return }
             Task { @MainActor [weak self] in
                 await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
             }
         }
     }
 
+    private let _showMapboxRoadLabels = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+
     /// Controls visibility of Mapbox base-map road labels.
     /// Only `true` shows them; `nil` (default) and `false` hide them.
     /// Aligned with the Android SDK's default-hidden behavior.
     public var showMapboxRoadLabels: Bool? {
-        didSet {
-            guard oldValue != showMapboxRoadLabels else { return }
+        get { _showMapboxRoadLabels.withLock { $0 } }
+        set {
+            let changed = _showMapboxRoadLabels.withLock { current -> Bool in
+                guard current != newValue else { return false }
+                current = newValue
+                return true
+            }
+            guard changed else { return }
             Task { @MainActor [weak self] in
                 await self?.mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
             }
@@ -256,7 +309,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public var expandedTapAreaEnabled: Bool = true
 
     public var routeRenderer: MPRouteRenderer {
-        _routeRenderer ?? MBRouteRenderer(mapView: mapView)
+        // The fallback renderer registers sources on the map, which is main-actor state; see `mpOnMainSync`.
+        _routeRenderer ?? mpOnMainSync("MapBoxProvider.routeRenderer") { MBRouteRenderer(mapView: mapView) }
     }
 
     /// Invalidates the renderer's internal model cache.
@@ -313,6 +367,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public var cameraOperator: MPCameraOperator {
         guard let mapView else { return MBCameraOperator() }
 
+        // No hop: the operator's initialiser only stores references. This getter is reached off the main actor
+        // (the view model producer reads `projection` on every clustered render), as Google's already is.
         return MBCameraOperator(mapView: mapView, provider: self)
     }
 
@@ -327,41 +383,46 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         self.mapView = mapView
         view = mapView
         self.accessToken = accessToken
-        positionPresenter = MBPositionPresenter(map: self.mapView?.mapboxMap)
+        // `mapboxMap` is main-actor state; the initialiser is reached through `MPMapConfig(mapBoxView:accessToken:)`
+        // on the main thread, so this is a same-thread fast path in practice and a logged hop otherwise.
+        positionPresenter = mpOnMainSync("MapBoxProvider.init") { MBPositionPresenter(map: mapView.mapboxMap) }
 
         mapboxTransitionHandler = MapboxWorldTransitionHandler(mapProvider: self)
 
-        onStyleLoadedCancelable = self.mapView?.mapboxMap.onStyleLoaded.observe { [weak self] _ in
-            // Re-apply ornament hiding on every style load: Mapbox's
-            // OrnamentsManager rebuilds its subviews when the style changes,
-            // which resets the logoView's isHidden flag and re-attaches it
-            // to the view hierarchy.
-            //
-            // Mapbox v11 delivers `onStyleLoaded` on the main thread in
-            // practice but the callback's signature does not enforce it,
-            // and `adjustOrnaments` touches UIKit (`logoView`,
-            // `ornaments.options`). `assumeIsolated` traps loudly if a
-            // future Mapbox version moves this off main instead of
-            // silently racing on UIKit state.
-            MainActor.assumeIsolated {
-                self?.adjustOrnaments()
-                // Remember what the map settled on, so base-map caching still knows the host's
-                // style after the map view is gone (see `styleURIForCaching`).
-                self?.rememberLoadedStyleURI()
-            }
-            // A style (re)load resets every style-import config back to its
-            // defaults, so re-apply the MapsIndoors-vs-Mapbox world visibility
-            // once the style is ready to accept it. This is the reliable
-            // "style ready" signal and runs regardless of camera movement, so
-            // the configured transition level is honoured even when the map
-            // opens already zoomed past it and no camera event ever fires
-            // (SPEX-2097).
-            Task { [weak self] in
-                await self?.mapboxTransitionHandler?.reapplyVisibility()
-            }
-            if self?.useMapsIndoorsStyle == false {
+        // `mapboxMap` is main-actor state; same fast path / logged hop as the presenter above.
+        mpOnMainSync("MapBoxProvider.init") { [self] in
+            onStyleLoadedCancelable = mapView.mapboxMap.onStyleLoaded.observe { [weak self] _ in
+                // Re-apply ornament hiding on every style load: Mapbox's
+                // OrnamentsManager rebuilds its subviews when the style changes,
+                // which resets the logoView's isHidden flag and re-attaches it
+                // to the view hierarchy.
+                //
+                // Mapbox v11 delivers `onStyleLoaded` on the main thread in
+                // practice but the callback's signature does not enforce it,
+                // and `adjustOrnaments` touches UIKit (`logoView`,
+                // `ornaments.options`). `assumeIsolated` traps loudly if a
+                // future Mapbox version moves this off main instead of
+                // silently racing on UIKit state.
+                MainActor.assumeIsolated {
+                    self?.adjustOrnaments()
+                    // Remember what the map settled on, so base-map caching still knows the host's
+                    // style after the map view is gone (see `styleURIForCaching`).
+                    self?.rememberLoadedStyleURI()
+                }
+                // A style (re)load resets every style-import config back to its
+                // defaults, so re-apply the MapsIndoors-vs-Mapbox world visibility
+                // once the style is ready to accept it. This is the reliable
+                // "style ready" signal and runs regardless of camera movement, so
+                // the configured transition level is honoured even when the map
+                // opens already zoomed past it and no camera event ever fires
+                // (SPEX-2097).
                 Task { [weak self] in
-                    await self?.verifySetup()
+                    await self?.mapboxTransitionHandler?.reapplyVisibility()
+                }
+                if self?.useMapsIndoorsStyle == false {
+                    Task { [weak self] in
+                        await self?.verifySetup()
+                    }
                 }
             }
         }
@@ -609,8 +670,16 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             guard let self else { return }
             if self.latestIdleTime.timeIntervalSinceNow < -0.5 {
                 self.latestIdleTime = Date.now
+                // Delivered through a detached task that then hops to the main-actor delegate, as it was before
+                // SPEX-2591, and not as `Task { @MainActor }` from this (main-thread) callback. The difference is
+                // when the idle render reaches `RenderTaskQueue`: a render that is not forced is dropped when
+                // another render is already queued, and the direct hop lands the idle render inside the window
+                // where the debounced `cameraChangedPosition` render is still queued. The idle is the last event
+                // after a gesture, so the dropped render was the one that would have detected the new building,
+                // and the floor selector kept the previous one (`testExerciseMap` went from passing to failing
+                // on every run). The detached hop arrives after that window, as the old delivery did.
                 Task.detached(priority: .userInitiated) { [weak self] in
-                    self?.delegate?.cameraIdle()
+                    await self?.delegate?.cameraIdle()
                 }
             }
         }
@@ -630,7 +699,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         await setViewModels(models: [], forceClear: true)
     }
 
-    @objc func onMapClick(_ sender: UITapGestureRecognizer) {
+    /// `@MainActor`: a gesture recogniser target, invoked on the main thread; the body reads the map view.
+    @objc @MainActor func onMapClick(_ sender: UITapGestureRecognizer) {
         let screenPoint = sender.location(in: mapView)
         guard let mapboxMap = mapView?.mapboxMap else { return }
 
@@ -653,7 +723,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
 
         let coordinateFallback: () -> Void = { [weak self] in
             guard let self, let coordinate = self.mapView?.mapboxMap.coordinate(for: screenPoint) else { return }
-            self.delegate?.didTap(coordinate: coordinate)
+            // Mapbox delivers the tap on the main thread; the delegate is main-actor isolated (SPEX-2589).
+            MainActor.assumeIsolated { self.delegate?.didTap(coordinate: coordinate) }
         }
 
         // Pass 1: exact hit under the finger (zero-tolerance point query). When
@@ -803,7 +874,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         if idString == "end_marker" || idString == "start_marker" || idString.starts(with: "stop") {
             routeRenderer.routeMarkerDelegate?.onRouteMarkerClicked(tag: idString)
         } else {
-            _ = delegate?.didTap(locationId: String(idString), type: result.queriedFeature.mpRenderedFeatureType)
+            // Mapbox delivers the tap on the main thread; the delegate is main-actor isolated (SPEX-2589).
+            MainActor.assumeIsolated { _ = delegate?.didTap(locationId: String(idString), type: result.queriedFeature.mpRenderedFeatureType) }
         }
         return true
     }
@@ -832,7 +904,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     }
 
     func onInfoWindowTapped(locationId: String) {
-        _ = delegate?.didTapInfoWindowOf(locationId: locationId)
+        // Reached from the info window's tap handler on the main thread; the delegate is main-actor isolated.
+        MainActor.assumeIsolated { _ = delegate?.didTapInfoWindowOf(locationId: locationId) }
     }
 
     /// Offset from the logo's margins to the attribution ornament's, so the info **glyph** lines up with the

@@ -4,12 +4,19 @@ import MapsIndoorsCore
 
 @MainActor
 class MBCameraOperator: MPCameraOperator {
-    weak var map: MapboxMap?
-    weak var view: MapView?
-    weak var mapProvider: MPMapProvider?
+    /// SAFETY: written only by the initialisers, before the operator is handed out, and read only on the main
+    /// actor afterwards. `nonisolated(unsafe)` because a weak property starts as `nil`, so the non-isolated
+    /// initialiser's first write counts as a mutation of main-actor state rather than an initialisation.
+    nonisolated(unsafe) weak var view: MapView?
+    nonisolated(unsafe) weak var mapProvider: MPMapProvider?
 
+    /// Read through the view rather than stored, so the initialiser never touches main-actor state.
+    var map: MapboxMap? { view?.mapboxMap }
+
+    /// Non-isolated, and it only stores references, so the provider's `cameraOperator` getter can build one on
+    /// any thread without a hop. That matters: the view model producer reads `cameraOperator.projection` off the
+    /// main actor on every clustered render.
     nonisolated required init(mapView: MapView, provider: MPMapProvider) {
-        map = mapView.mapboxMap
         view = mapView
         mapProvider = provider
     }

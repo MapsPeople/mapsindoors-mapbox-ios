@@ -1,8 +1,12 @@
 import Foundation
-import MapboxMaps
-import MapsIndoorsCore
+@preconcurrency import MapboxMaps
+@_spi(Private) import MapsIndoorsCore
 
-class MBPositionPresenter: MPPositionPresenter {
+/// Owns the blue-dot layers on a Mapbox map. Main-actor isolated, because every call is a style write; the
+/// `MPPositionPresenter` requirements are non-isolated and hop to the main actor with a `Task`, where the main-queue
+/// async used to be.
+@MainActor
+final class MBPositionPresenter: MPPositionPresenter {
     private weak var map: MapboxMap?
 
     required init(map: MapboxMap?) {
@@ -26,7 +30,7 @@ class MBPositionPresenter: MPPositionPresenter {
     /// valid slot — `Slot`'s string-literal init does not validate, so a typo compiles.
     static let blueDotSlot: Slot = "top"
 
-    func apply(
+    nonisolated func apply(
         position: CLLocationCoordinate2D,
         markerIcon: UIImage,
         markerBearing: Double,
@@ -36,12 +40,9 @@ class MBPositionPresenter: MPPositionPresenter {
         circleStrokeColor: UIColor,
         circleStrokeWidth: Double
     ) {
-        // Fast-path early-out only. Do not bind `map` here: it's a weak var,
-        // and binding strongly would let the dispatched closure outlive the
-        // map, defeating the inner re-fetch from `self.map` after the hop.
-        guard map != nil else { return }
-
-        DispatchQueue.main.async { [weak self] in
+        // `map` is re-fetched after the hop: it is a weak var, and binding it here would let the dispatched
+        // closure outlive the map.
+        Task { @MainActor [weak self] in
             guard let self, let map = self.map, map.isStyleLoaded else { return }
             applyBlueDotUpdate(
                 map: map,
@@ -118,12 +119,9 @@ class MBPositionPresenter: MPPositionPresenter {
         }
     }
 
-    func clear() {
-        // See `apply` for why we don't bind `map` here: weak var, re-fetched
-        // inside the dispatched closure to observe deallocation after hop.
-        guard map != nil else { return }
-
-        DispatchQueue.main.async { [weak self] in
+    nonisolated func clear() {
+        // See `apply` for why `map` is re-fetched inside the dispatched closure.
+        Task { @MainActor [weak self] in
             guard let self, let map = self.map, map.isStyleLoaded else { return }
             do {
                 if map.layerExists(withId: layerBlueDotCircle) {

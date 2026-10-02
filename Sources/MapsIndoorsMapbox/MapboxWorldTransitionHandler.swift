@@ -25,40 +25,24 @@ class MapboxWorldTransitionHandler {
     // + trees). Used as the offline fallback (see `useShow3dObjectsNow`).
     private let show3dObjects = "show3dObjects"
 
-    // How base-map buildings are hidden across the transition band:
-    //  - buildingsOpacity: graded float → gradual fade. The live Standard style honours this
-    //    key online.
-    //  - show3dObjects: binary umbrella toggle → hard hide, the offline fallback (the cached
-    //    Standard style does not honour buildingsOpacity offline).
-    //  - auto (default): buildingsOpacity when online, show3dObjects when offline — full
-    //    experience online, graceful degradation offline.
-    // The raw values are the wire format: outside callers write the bare integer into
-    // `buildingHideModeDefaultsKey`, so renumbering a case silently selects a different
-    // mechanism. `test_buildingHideModeRawValues_matchTheWireContract` pins them.
-    enum BuildingHideMode: Int { case auto = 0, buildingsOpacity = 1, show3dObjects = 2 }
-
-    // Optional override, read live from UserDefaults. Absent/0 → auto. Primarily a test/QA seam;
-    // observers re-apply on `buildingHideModeChanged` so a change takes effect immediately.
-    //
-    // Namespaced to the SDK rather than to a sample app: this lever ships, is not compiled out, and
-    // both constants are internal to this module — so the literal strings are the entire contract
-    // for anyone outside it, whether that is support, QA, or a host app. A rename therefore breaks
-    // callers with no compile error, which is why `test_buildingHideModeKeys_areNamespacedToTheSDK`
-    // pins both of them.
-    static let buildingHideModeDefaultsKey = "com.mapspeople.mapsindoors.debug.buildingHideMode"
-    static let buildingHideModeChanged = Notification.Name("com.mapspeople.mapsindoors.debug.buildingHideModeChanged")
+    // Internal now that the selector is typed: nothing outside this module needs to name it, so it
+    // is an implementation detail of how a change reaches the handler rather than part of the
+    // contract. `MapBoxProvider.buildingHideMode` is what a caller sets.
+    nonisolated static let buildingHideModeChanged = Notification.Name("com.mapspeople.mapsindoors.debug.buildingHideModeChanged")
 
     /// Whether to hide buildings via the binary `show3dObjects` right now — honours the override,
     /// and in `auto` falls back to `show3dObjects` only when offline.
     private var useShow3dObjectsNow: Bool {
-        switch BuildingHideMode(rawValue: UserDefaults.standard.integer(forKey: Self.buildingHideModeDefaultsKey)) ?? .auto {
+        switch MapBoxProvider.buildingHideMode {
         case .buildingsOpacity: return false
         case .show3dObjects: return true
         case .auto: return !NetworkPathMonitor.shared.isConnected
         }
     }
 
-    private var reapplyObservers: [NSObjectProtocol] = []
+    // `nonisolated(unsafe)`: appended in the non-isolated initialiser, drained in `deinit`; both are single-owner
+    // moments with no concurrent access.
+    nonisolated(unsafe) private var reapplyObservers: [NSObjectProtocol] = []
 
     weak var map: MapBoxProvider?
     var enableMapboxBuildings = true {
@@ -144,7 +128,7 @@ class MapboxWorldTransitionHandler {
     }
 
     /// Overridable so tests can subclass via `@testable import` and count invocations
-    /// scheduled by `MapBoxProvider` property didSet observers.
+    /// scheduled by the `MapBoxProvider` property setters.
     func configureMapsIndoorsVsMapboxVisibility() async {
         guard let map, let activeMapboxMap else { return }
 

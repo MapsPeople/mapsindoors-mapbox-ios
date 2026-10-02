@@ -96,14 +96,17 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     ) async throws {
         // Resolve against the live map first, so everything below caches the style that is
         // actually being rendered rather than the one Core assumed (see resolvedStyleSource).
-        let effectiveSource = await resolvedStyleSource(for: styleSource)
+        // The same call builds the load options, so the style pack and the descriptors are
+        // guaranteed to come from one resolution — see `resolvedRequest`.
+        let request = await resolvedRequestFromMainActor(
+            for: styleSource, bounds: bounds, minZoom: minZoom, maxZoom: maxZoom)
 
         // Persist the style pack for the style the map actually loads (the MapsIndoors
         // wrapper style, or a consumer's custom style) so its style JSON / sprites /
         // glyphs — and the resources of any style it imports — are available on a cold
         // offline launch. The base-map *tiles* are cached separately below, from the base
         // map's own style (see makeDescriptors).
-        try await loadStylePack(for: mapStyleURI(for: effectiveSource))
+        try await loadStylePack(for: mapStyleURI(for: request.styleSource))
 
         // Hold the Cancelable so a cancelled enclosing Task stops the in-flight
         // download instead of letting it run to completion (network + battery).
@@ -114,12 +117,7 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
                 // runOnOwningActor). The load is async; its completion is delivered on a
                 // TileStore worker thread, which is fine.
                 self.runOnOwningActor {
-                    let descriptors = self.makeDescriptors(for: effectiveSource, minZoom: minZoom, maxZoom: maxZoom)
-                    guard let loadOptions = TileRegionLoadOptions(
-                        geometry: self.polygonGeometry(for: bounds),
-                        descriptors: descriptors,
-                        acceptExpired: false
-                    ) else {
+                    guard let loadOptions = request.loadOptions else {
                         continuation.resume(throwing: MPError.unknownError)
                         return
                     }
@@ -151,21 +149,31 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     ) async throws -> MPBaseMapSizeEstimate {
         // Deliberately no `loadStylePack` counterpart: the provider exposes no way to estimate
         // a style pack, and calling the real loader here would download it as a side effect of
-        // asking a question. The style-pack bytes are therefore outside this figure — the same
-        // exclusion `cachedRegionSize(forRegionIds:)` makes, so estimate and recorded size stay
-        // comparable.
+        // asking a question. So the *map style's own* pack is never fetched for a question.
+        //
+        // That is not the same as the figure being free of style-pack bytes. `makeDescriptors`
+        // attaches `stylePackOptions` to every descriptor whose style is not the map style, so
+        // Standard's pack is part of what this describes whenever the map is on anything else —
+        // which is the usual case. Only a map already on Standard produces descriptors carrying
+        // no style-pack options at all.
+        //
+        // What is not settled here is whether Mapbox counts those bytes into the estimate or into
+        // the separate style-pack store that `cachedRegionSize(forRegionIds:)` deliberately
+        // excludes; that is its accounting, not ours. The download builds from the same descriptors
+        // either way, so the estimate and the download stay in step with each other even where the
+        // estimate and the recorded per-dataset size may not.
+        //
+        // The same call the download builds its options from, so the estimate describes the
+        // request that would actually run — including the style. Without this the estimate
+        // measured the MapsIndoors style while the download cached the host's own.
+        let request = await resolvedRequestFromMainActor(
+            for: styleSource, bounds: bounds, minZoom: minZoom, maxZoom: maxZoom)
+
         let cancelable = LockedCancelable()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<MPBaseMapSizeEstimate, Error>) in
                 self.runOnOwningActor {
-                    // The same descriptors and geometry the real download builds, so the
-                    // estimate covers the actual request rather than an approximation.
-                    let descriptors = self.makeDescriptors(for: styleSource, minZoom: minZoom, maxZoom: maxZoom)
-                    guard let loadOptions = TileRegionLoadOptions(
-                        geometry: self.polygonGeometry(for: bounds),
-                        descriptors: descriptors,
-                        acceptExpired: false
-                    ) else {
+                    guard let loadOptions = request.loadOptions else {
                         continuation.resume(throwing: MPError.unknownError)
                         return
                     }
@@ -268,13 +276,57 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
 
     // MARK: - Private helpers
 
+    /// The style the map is actually rendering, and the load options built from it.
+    ///
+    /// Both `cacheRegion` and `estimateRegion` go through here, so they cannot describe
+    /// different downloads. `estimateRegion` previously built its descriptors from the
+    /// unresolved source, so on a host running its own style the estimate measured the
+    /// MapsIndoors style while the download cached the host's — silently, since both calls
+    /// succeeded and only the figure was wrong.
+    ///
+    /// The resolved source is returned rather than recomputed, so one resolution backs both the
+    /// style pack and the descriptors.
+    ///
+    /// `@MainActor` because `resolvedStyleSource` reads the live map and `makeDescriptors` calls
+    /// into `OfflineManager` — the owning-thread requirement `runOnOwningActor` exists for.
+    @MainActor
+    func resolvedRequest(
+        for requested: MPMapboxStyleSource,
+        bounds: MPGeoBounds,
+        minZoom: Double,
+        maxZoom: Double
+    ) -> (styleSource: MPMapboxStyleSource, loadOptions: TileRegionLoadOptions?) {
+        let effective = resolvedStyleSource(for: requested)
+        let options = TileRegionLoadOptions(
+            geometry: Self.polygonGeometry(for: bounds),
+            descriptors: makeDescriptors(for: effective, minZoom: minZoom, maxZoom: maxZoom),
+            acceptExpired: false)
+        return (effective, options)
+    }
+
+    /// `resolvedRequest`, called from outside the main actor.
+    ///
+    /// `TileRegionLoadOptions` is a Mapbox class that is not `Sendable`, so the hop carries the
+    /// result in ``MainActorBuiltRequest``.
+    private func resolvedRequestFromMainActor(
+        for requested: MPMapboxStyleSource,
+        bounds: MPGeoBounds,
+        minZoom: Double,
+        maxZoom: Double
+    ) async -> MainActorBuiltRequest {
+        return await MainActor.run {
+            let request = self.resolvedRequest(for: requested, bounds: bounds, minZoom: minZoom, maxZoom: maxZoom)
+            return MainActorBuiltRequest(styleSource: request.styleSource, loadOptions: request.loadOptions)
+        }
+    }
+
     /// Run `work` on the main actor — the thread that owns this provider's `TileStore`
     /// and `OfflineManager`. Both are bindgen objects created on the main thread in
     /// `MapBoxProvider.init`, so every call into them must originate on that thread, or
     /// Mapbox logs "called from a thread that is not owning the object". Their completion
     /// callbacks are delivered on a TileStore worker thread, which is fine. Centralised
     /// here so the invariant lives in one place across all the wrapping methods.
-    private func runOnOwningActor(_ work: @MainActor @escaping () -> Void) {
+    private func runOnOwningActor(_ work: @MainActor @Sendable @escaping () -> Void) {
         Task { @MainActor in work() }
     }
 
@@ -346,6 +398,11 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
             return StyleURI(rawValue: Constants.Style.mapsIndoorsDefaultURI) ?? .standard
         case .custom(let url):
             return StyleURI(url: url) ?? .standard
+        @unknown default:
+            // `MPMapboxStyleSource` is a public enum of the MapsIndoors module, built with library evolution, so
+            // in Swift 6 mode a Release build treats it as non-frozen and requires this arm; Debug does not
+            // (see the release-build non-frozen enum note in the project history).
+            return .standard
         }
     }
 
@@ -451,7 +508,7 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     }
 
     // Build a closed polygon ring from the four corners of the bounding box.
-    private func polygonGeometry(for bounds: MPGeoBounds) -> Geometry {
+    private nonisolated static func polygonGeometry(for bounds: MPGeoBounds) -> Geometry {
         let sw = bounds.southWest
         let ne = bounds.northEast
         let nw = CLLocationCoordinate2D(latitude: ne.latitude, longitude: sw.longitude)
@@ -459,6 +516,16 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         // Polygon init takes [[CLLocationCoordinate2D]]; ring must close.
         return .polygon(Polygon([[sw, se, ne, nw, sw]]))
     }
+}
+
+/// What `resolvedRequest` builds, carried from the main actor to the caller and back.
+///
+/// SAFETY: `TileRegionLoadOptions` is a Mapbox class with no `Sendable` conformance. The options
+/// are built on the main actor, carried unread through the caller, and read again only on the main
+/// actor inside `runOnOwningActor`, so one owner holds them at a time.
+private struct MainActorBuiltRequest: @unchecked Sendable {
+    let styleSource: MPMapboxStyleSource
+    let loadOptions: TileRegionLoadOptions?
 }
 
 /// Thread-safe holder for a Mapbox `Cancelable`. The continuation body (which

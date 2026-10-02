@@ -1,8 +1,12 @@
 import Foundation
-import MapboxMaps
+@preconcurrency import MapboxMaps
 @_spi(Private) import MapsIndoorsCore
 
-class MBTileProvider {
+/// Main-actor isolated: it owns a raster source and layer on the map. `update()` is the one non-isolated entry
+/// point (connectivity changes and `reloadTilesForFloorChange` reach it from anywhere) and hops to the main actor
+/// with a `Task`, where its main-queue async used to be.
+@MainActor
+final class MBTileProvider {
     /// Reports whether the device currently has a network path.
     ///
     /// Injected so a test can drive the online-to-offline transition — the one case the source
@@ -16,7 +20,8 @@ class MBTileProvider {
     public var _tileProvider: MPTileProvider
     private var rasterSource: RasterSource
     private let isConnected: ConnectivityProbe
-    private var connectivityObserver: NSObjectProtocol?
+    // `nonisolated(unsafe)`: set once in `init`, read once in `deinit`, which cannot be isolated.
+    nonisolated(unsafe) private var connectivityObserver: NSObjectProtocol?
 
     /// `mapProvider` is only read for its `transitionLevel` and is already held weakly, so it is
     /// optional: that lets a test drive the source lifecycle against a bare `MapView` without
@@ -73,22 +78,26 @@ class MBTileProvider {
         }
     }
 
-    func update() {
-        DispatchQueue.main.async {
-            /// Independent steps with independent error handling: the layer still needs its
-            /// source, fade and opacity applied even when re-configuring the source failed.
-            /// Sharing one `do` block meant a single throw in the source step skipped the layer
-            /// step entirely.
-            do {
-                try self.updateSource()
-            } catch {
-                MPLog.mapbox.error("Error updating tile source: \(error.localizedDescription)")
-            }
-            do {
-                try self.updateLayer()
-            } catch {
-                MPLog.mapbox.error("Error updating tile layer: \(error.localizedDescription)")
-            }
+    nonisolated func update() {
+        Task { @MainActor [weak self] in
+            self?.updateOnMain()
+        }
+    }
+
+    private func updateOnMain() {
+        /// Independent steps with independent error handling: the layer still needs its
+        /// source, fade and opacity applied even when re-configuring the source failed.
+        /// Sharing one `do` block meant a single throw in the source step skipped the layer
+        /// step entirely.
+        do {
+            try updateSource()
+        } catch {
+            MPLog.mapbox.error("Error updating tile source: \(error.localizedDescription)")
+        }
+        do {
+            try updateLayer()
+        } catch {
+            MPLog.mapbox.error("Error updating tile layer: \(error.localizedDescription)")
         }
     }
 

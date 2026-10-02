@@ -1,6 +1,6 @@
 import Combine
 import Foundation
-import MapboxMaps
+@preconcurrency import MapboxMaps
 @_spi(Private) import MapsIndoorsCore
 import UIKit
 
@@ -53,7 +53,8 @@ class MBRenderer {
 
     private weak var provider: MapBoxProvider?
 
-    private var onImageUnusedCancelable: Cancelable?
+    // `nonisolated(unsafe)`: cancelled in `deinit`, which cannot be isolated; otherwise main-actor only.
+    nonisolated(unsafe) private var onImageUnusedCancelable: Cancelable?
 
     init(mapView: MapView?, provider: MapBoxProvider?) {
         map = mapView?.mapboxMap
@@ -190,7 +191,14 @@ class MBRenderer {
             layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
             layerUpdate.textLetterSpacing = .constant(-0.01)
 
-            layerUpdate.symbolZElevate = .constant(true)
+            // Never elevate POI symbols. `symbol-z-elevate` lifts a symbol onto the rooftop of any
+            // fill-extrusion beneath it, and that includes the base map's own 3D buildings, which a
+            // fade (opacity or colour alpha) hides without removing. Under a pitched camera an icon
+            // inside a tall tower then draws from roof height, far from its floor plan (SPEX-2617).
+            // Written explicitly although `false` is Mapbox's default, so the contract lives here
+            // and `MBRendererMarkerElevationTests` can pin it: deleting this line would otherwise
+            // leave nothing that fails.
+            layerUpdate.symbolZElevate = .constant(false)
 
             // text styling
             layerUpdate.textSize = .expression(Exp(.get) { Key.labelSize.rawValue })
@@ -819,7 +827,12 @@ class MBRenderer {
 
             try Task.checkCancellation()
 
-            let res = try await group.reduce(into: [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()) { result, feature in result.append(feature) }
+            // Drained with `for try await` rather than `reduce(into:)`: the latter sends the group and its
+            // accumulator through a non-Sendable closure, which strict checking flags; the loop keeps both here.
+            var res = [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()
+            for try await feature in group {
+                res.append(feature)
+            }
 
             return res
         }

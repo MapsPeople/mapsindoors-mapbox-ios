@@ -1,7 +1,7 @@
 import Foundation
-import MapboxMaps
+@preconcurrency import MapboxMaps
 @_spi(Private) import MapsIndoors
-import MapsIndoorsCore
+@_spi(Private) import MapsIndoorsCore
 
 extension BinaryFloatingPoint {
     var degrees: Self {
@@ -13,9 +13,22 @@ extension BinaryFloatingPoint {
     }
 }
 
-class MBRouteRenderer: MPRouteRenderer {
+/// Draws a route (halo, base line, stamp, travelling animation, endpoint markers) on a Mapbox map view.
+///
+/// Main-actor isolated: every field is Mapbox style state, an animator over a `CADisplayLink`, or a generation
+/// counter guarding them. The `MPRouteRenderer` requirements are non-isolated and reached from Core; `apply`,
+/// `applyMarkers` and `clear` snapshot what they need from the (non-Sendable) model and options into values and
+/// hop to the main actor with a `Task`, where the main-queue async each used to open with was. `moveCamera`
+/// always ran synchronously on its caller (the main-actor directions renderer) and keeps doing so through
+/// `mpOnMainSync`.
+@MainActor
+final class MBRouteRenderer: MPRouteRenderer {
     private weak var mapView: MapView?
-    var routeMarkerDelegate: MPRouteMarkerDelegate?
+
+    // SAFETY: a non-isolated protocol requirement on a main-actor class. Written by the directions renderer and
+    // read by the provider's tap handler, both on the main thread, as before this class was isolated;
+    // `nonisolated(unsafe)` records that the access is main-only by convention rather than by proof.
+    nonisolated(unsafe) var routeMarkerDelegate: MPRouteMarkerDelegate?
 
     private var valueAnimator: RouteLineAnimator?
 
@@ -29,15 +42,17 @@ class MBRouteRenderer: MPRouteRenderer {
     // e.g. an old flow tick re-trimming the line right after a live switch to pulse.
     private var animationGeneration = 0
 
-    private var route = [CLLocationCoordinate2D]()
+    /// Internal (read-only) so tests can check what `apply` and `clear` leave behind.
+    private(set) var route = [CLLocationCoordinate2D]()
 
-    private static let casingOffset = 2.0  // default halo padding per side (total width = strokeWeight + 2 × this)
-    private static let fallbackColor = UIColor(red: 48.0 / 255.0, green: 113.0 / 255.0, blue: 217.0 / 255.0, alpha: 1)
-    private static let stampImageID = "ROUTE_STAMP_IMAGE"
+    // `nonisolated`: immutable values, some read by `RouteStyle.init` on the caller's side of the hop.
+    private nonisolated static let casingOffset = 2.0  // default halo padding per side (total width = strokeWeight + 2 × this)
+    private nonisolated static let fallbackColor = UIColor(red: 48.0 / 255.0, green: 113.0 / 255.0, blue: 217.0 / 255.0, alpha: 1)
+    private nonisolated static let stampImageID = "ROUTE_STAMP_IMAGE"
 
     /// Dash array (line-width units; nil = solid) + line cap for a stroke style.
     /// Shared by the base and animated line layers so the two never diverge.
-    private static func dashPattern(for style: MPStrokeStyle) -> (pattern: [Double]?, cap: LineCap) {
+    private nonisolated static func dashPattern(for style: MPStrokeStyle) -> (pattern: [Double]?, cap: LineCap) {
         switch style {
         case .solid: return (nil, .butt)
         case .dashed: return ([4, 2], .round)
@@ -50,6 +65,80 @@ class MBRouteRenderer: MPRouteRenderer {
         self.mapView = mapView
         configureSources()
         self.mapView?.mapboxMap.addMapsIndoorsLayers()
+    }
+
+    // MARK: - Values that cross the hop
+
+    /// Everything `apply` derives from `MPDirectionsRendererOptions`, resolved on the caller's side so only values
+    /// travel to the main actor. Colours and images are Sendable; the enums are MapsIndoors' own.
+    private struct RouteStyle: Sendable {
+        let strokeColor: UIColor
+        let strokeOpacity: Double
+        let strokeWeight: Double
+        let strokeStyle: MPStrokeStyle
+        let haloEnabled: Bool
+        let haloColor: UIColor
+        let haloOpacity: Double
+        let haloWidth: Double
+        let elevated: Bool
+        let elevationHeight: Double
+        let stampType: MPRouteStampType
+        let stampImage: UIImage?
+        let stampSpacing: Double
+        let stampSize: Double
+        let overlayColor: UIColor
+        let overlayOpacity: Double
+        let overlayWeight: Double
+        let animationType: MPRouteAnimationType
+        let animationRepeating: Bool
+
+        init(options: MPDirectionsRendererOptions) {
+            strokeColor = options.strokeColor ?? MBRouteRenderer.fallbackColor
+            strokeOpacity = options.strokeOpacity?.doubleValue ?? 1.0
+            strokeWeight = options.strokeWeight?.doubleValue ?? 4.0
+            strokeStyle = options.strokeStyle ?? .solid
+            // Halo shows by default (a faint version of the line colour) unless explicitly disabled.
+            haloEnabled = options.backgroundColorEnabled?.boolValue ?? true
+            haloColor = options.backgroundColor ?? strokeColor
+            haloOpacity = options.backgroundColor != nil ? (options.backgroundColorOpacity?.doubleValue ?? 1.0) : 0.3
+            haloWidth = strokeWeight + 2 * (options.backgroundColorWeight?.doubleValue ?? MBRouteRenderer.casingOffset)
+            // Elevation (3D): lift every route layer by `elevationHeight` metres when enabled; Mapbox v11 only.
+            // Core always resolves a height, so the fallback here only documents the same built-in default.
+            elevated = options.elevated?.boolValue ?? false
+            elevationHeight = options.elevationHeight?.doubleValue ?? 0.3
+            stampType = options.stampType ?? .none
+            stampImage = RouteStampIcon.image(type: stampType, arrowStyle: options.arrowStyle ?? .chevron, color: options.stampColor ?? .white, customImage: options.stampImage)
+            stampSpacing = options.stampSpacing?.doubleValue ?? 24
+            let stampScale = options.stampScale?.doubleValue ?? 1.0
+            // Target on-screen icon size. The arrow stays proportional to the line weight (kept in sync with
+            // Google); a custom icon renders at a fixed 24 pt @1× base (× scale), so its size doesn't track the line
+            // weight or the source image. icon-size scales the source uniformly, so the caller divides by its LONGER side.
+            stampSize = (stampType == .custom ? 24.0 : strokeWeight * 2.5) * stampScale
+            // The travelling overlay's own style (animatedOverlay*, defaulting to the route-line look). Colour and
+            // opacity are kept apart the same way as the base line and the halo: strip the colour's embedded alpha
+            // and let line-opacity carry it, so the overlay matches Google.
+            overlayColor = (options.animatedOverlayColor ?? strokeColor).withAlphaComponent(1.0)
+            overlayOpacity = options.animatedOverlayOpacity?.doubleValue ?? 1.0
+            overlayWeight = options.animatedOverlayWeight?.doubleValue ?? strokeWeight
+            animationType = options.animationType ?? .flow
+            animationRepeating = options.animationRepeating
+        }
+    }
+
+    /// The parts of a `RouteViewModelProducer` the renderer reads, copied out on the caller's side. The producer is
+    /// a mutable class owned by Core; the view models it carries are `Sendable` already.
+    private struct RouteSnapshot: Sendable {
+        let polyline: [CLLocationCoordinate2D]
+        let start: (any MPViewModel)?
+        let end: (any MPViewModel)?
+        let stops: [any MPViewModel]
+
+        init(_ model: RouteViewModelProducer) {
+            polyline = model.polyline
+            start = model.start
+            end = model.end
+            stops = model.stops ?? []
+        }
     }
 
     func configureSources() {
@@ -92,13 +181,15 @@ class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    func apply(model: RouteViewModelProducer, options: MPDirectionsRendererOptions, animate: Bool, duration: TimeInterval, pathSmoothing: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            self?.applyOnMain(model: model, options: options, animate: animate, duration: duration, pathSmoothing: pathSmoothing)
+    nonisolated func apply(model: RouteViewModelProducer, options: MPDirectionsRendererOptions, animate: Bool, duration: TimeInterval, pathSmoothing: Bool) {
+        let snapshot = RouteSnapshot(model)
+        let style = RouteStyle(options: options)
+        Task { @MainActor [weak self] in
+            self?.applyOnMain(snapshot: snapshot, style: style, animate: animate, duration: duration)
         }
     }
 
-    private func applyOnMain(model: RouteViewModelProducer, options: MPDirectionsRendererOptions, animate: Bool, duration: TimeInterval, pathSmoothing _: Bool) {
+    private func applyOnMain(snapshot: RouteSnapshot, style: RouteStyle, animate: Bool, duration: TimeInterval) {
         // Cancel any in-flight animator AND stop the continuous-render loop before the style guard, so if this
         // apply bails (style not loaded) neither keeps running against a stale/absent style. The animate branch
         // below re-arms the render loop; a non-animate apply leaves it stopped so the map idles.
@@ -112,21 +203,18 @@ class MBRouteRenderer: MPRouteRenderer {
 
         configureSources()
 
-        route = model.polyline
+        route = snapshot.polyline
 
-        let strokeColor = options.strokeColor ?? MBRouteRenderer.fallbackColor
-        let strokeOpacity = options.strokeOpacity?.doubleValue ?? 1.0
-        let strokeWeight = options.strokeWeight?.doubleValue ?? 4.0
-        let strokeStyle = options.strokeStyle ?? .solid
-        // Halo shows by default (a faint version of the line colour) unless explicitly disabled.
-        let haloEnabled = options.backgroundColorEnabled?.boolValue ?? true
-        let haloColor = options.backgroundColor ?? strokeColor
-        let haloOpacity = options.backgroundColor != nil ? (options.backgroundColorOpacity?.doubleValue ?? 1.0) : 0.3
-        let haloWidth = strokeWeight + 2 * (options.backgroundColorWeight?.doubleValue ?? MBRouteRenderer.casingOffset)
-        // Elevation (3D): lift every route layer by `elevationHeight` metres when enabled; Mapbox v11 only.
-        // Core always resolves a height, so the fallback here only documents the same built-in default.
-        let elevated = options.elevated?.boolValue ?? false
-        let elevationHeight = options.elevationHeight?.doubleValue ?? 0.3
+        let strokeColor = style.strokeColor
+        let strokeOpacity = style.strokeOpacity
+        let strokeWeight = style.strokeWeight
+        let strokeStyle = style.strokeStyle
+        let haloEnabled = style.haloEnabled
+        let haloColor = style.haloColor
+        let haloOpacity = style.haloOpacity
+        let haloWidth = style.haloWidth
+        let elevated = style.elevated
+        let elevationHeight = style.elevationHeight
 
         // Draw line
         let geom = LineString(route).geometry
@@ -200,14 +288,9 @@ class MBRouteRenderer: MPRouteRenderer {
         // the line. The value-carrying props are set imperatively (setLayerProperty), not via updateLayer,
         // which skips writing a value equal to the layer default (e.g. icon-size 1 / visibility visible) and
         // would otherwise leave a previous route's stamp settings in place.
-        let stampType = options.stampType ?? .none
-        let stampImage = RouteStampIcon.image(type: stampType, arrowStyle: options.arrowStyle ?? .chevron, color: options.stampColor ?? .white, customImage: options.stampImage)
-        let stampSpacing = options.stampSpacing?.doubleValue ?? 24
-        let stampScale = options.stampScale?.doubleValue ?? 1.0
-        // Target on-screen icon size. The arrow stays proportional to the line weight (kept in sync with
-        // Google); a custom icon renders at a fixed 24 pt @1× base (× scale), so its size doesn't track the line
-        // weight or the source image. icon-size scales the source uniformly, so divide by its LONGER side below.
-        let stampSize = (stampType == .custom ? 24.0 : strokeWeight * 2.5) * stampScale
+        let stampImage = style.stampImage
+        let stampSpacing = style.stampSpacing
+        let stampSize = style.stampSize
         do {
             try mapView.mapboxMap.updateLayer(withId: Constants.LayerIDs.stampLayer, type: SymbolLayer.self) { stampLayer in
                 // source is fixed at layer creation (MapboxMap+Extension); it isn't settable via updateLayer in v11.
@@ -232,7 +315,7 @@ class MBRouteRenderer: MPRouteRenderer {
             MPLog.mapbox.error("Error updating route stamp layer in route renderer!")
         }
 
-        commitMarkers(model: model, on: mapView)
+        commitMarkers(snapshot: snapshot, on: mapView)
 
         if animate {
             // The travelling overlay sits ON TOP of the always-visible base line, using its own style
@@ -244,10 +327,10 @@ class MBRouteRenderer: MPRouteRenderer {
             // Colour and opacity are kept apart the same way as the base line and the halo: strip the colour's
             // embedded alpha and let line-opacity carry it, so the overlay matches Google. The fallbacks mirror
             // core's resolved defaults (which always populate these, so they are belt-and-braces).
-            let overlayColor = (options.animatedOverlayColor ?? strokeColor).withAlphaComponent(1.0)
-            let overlayOpacity = options.animatedOverlayOpacity?.doubleValue ?? 1.0
-            let overlayWeight = options.animatedOverlayWeight?.doubleValue ?? strokeWeight
-            let animationType = options.animationType ?? .flow
+            let overlayColor = style.overlayColor
+            let overlayOpacity = style.overlayOpacity
+            let overlayWeight = style.overlayWeight
+            let animationType = style.animationType
             do {
                 if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.animatedLineSource) {
                     // All types draw the WHOLE route in the animated source; the motion comes from trimming
@@ -286,7 +369,7 @@ class MBRouteRenderer: MPRouteRenderer {
 
             valueAnimator = RouteLineAnimator(
                 duration: duration,
-                repeatMode: options.animationRepeating ? .infinite : .once,
+                repeatMode: style.animationRepeating ? .infinite : .once,
                 onProgress: { [weak self] progress in
                     // On the main thread (CADisplayLink). setLayerProperty writes just the one property —
                     // updateLayer round-trips the whole layer every frame, which stutters. Drop a tick from a
@@ -347,7 +430,7 @@ class MBRouteRenderer: MPRouteRenderer {
     /// and z-offset `0`. A negative height is floored to `0` so the line can't sink below the floor plane —
     /// `line-z-offset` has no minimum (unlike `symbol-z-offset`, which floors at 0), so the SDK clamps it here.
     /// Pure, so the mapping (and the clamp) is unit-testable without a map.
-    static func elevationLayerValues(elevated: Bool, height: Double) -> (lineReference: String, symbolReference: String, zOffset: Double) {
+    nonisolated static func elevationLayerValues(elevated: Bool, height: Double) -> (lineReference: String, symbolReference: String, zOffset: Double) {
         (lineReference: elevated ? "ground" : "none", symbolReference: "ground", zOffset: elevated ? max(height, 0) : 0)
     }
 
@@ -395,7 +478,7 @@ class MBRouteRenderer: MPRouteRenderer {
     /// (leaving the components at 0 → transparent) for non-RGB colours — grayscale like `UIColor.white` /
     /// `.black`, or Display P3 — which would otherwise make the comet invisible. Mirrors how `StyleColor(_:)`
     /// handles the line-color for flow / pulse.
-    private static func rgbaString(from color: UIColor) -> String {
+    private nonisolated static func rgbaString(from color: UIColor) -> String {
         var normalized = color
         if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
             let converted = color.cgColor.converted(to: srgb, intent: .defaultIntent, options: nil) {
@@ -409,10 +492,11 @@ class MBRouteRenderer: MPRouteRenderer {
     /// Re-commits only the route marker source, leaving every line / stamp layer — and the running animator —
     /// alone. The marker source is fully replaced by the new feature collection, so a marker the model no
     /// longer carries (an endpoint pin whose display rule just went out of its zoom range) disappears.
-    func applyMarkers(model: RouteViewModelProducer) {
-        DispatchQueue.main.async { [weak self] in
+    nonisolated func applyMarkers(model: RouteViewModelProducer) {
+        let snapshot = RouteSnapshot(model)
+        Task { @MainActor [weak self] in
             guard let self, let mapView = self.mapView, mapView.mapboxMap.isStyleLoaded else { return }
-            self.commitMarkers(model: model, on: mapView)
+            self.commitMarkers(snapshot: snapshot, on: mapView)
             // Nothing else in this pass wakes the map, and with no animation running there is no render loop
             // to pick the change up — so ask for the one frame that draws the toggled marker.
             mapView.mapboxMap.triggerRepaint()
@@ -421,13 +505,13 @@ class MBRouteRenderer: MPRouteRenderer {
 
     /// Registers the marker icons and commits the marker source — the marker slice of `applyOnMain`, extracted
     /// for readability.
-    private func commitMarkers(model: RouteViewModelProducer, on mapView: MapView) {
+    private func commitMarkers(snapshot: RouteSnapshot, on mapView: MapView) {
         // Register the marker icons BEFORE committing the marker source. The symbol layer resolves its icon via
         // `Exp(.image){Exp(.id)}` when a feature is committed; registering the image first (as the location
         // renderer does) means that commit finds the image present and draws it at once. Register each
         // independently: a single odd raster makes Mapbox's addImage throw a StyleError, and one aborting throw
         // would suppress every remaining icon (dropping the pins while the labels still draw).
-        for marker in [model.start, model.end].compactMap({ $0 }) + (model.stops ?? []) {
+        for marker in [snapshot.start, snapshot.end].compactMap({ $0 }) + snapshot.stops {
             guard let icon = marker.data[.icon] as? UIImage else { continue }
             do {
                 try mapView.mapboxMap.addImage(icon, id: marker.id, sdf: false)
@@ -435,7 +519,7 @@ class MBRouteRenderer: MPRouteRenderer {
                 MPLog.mapbox.error("Skipping invalid route marker image \(marker.id): \(error)")
             }
         }
-        let markerJson = markersToJsonArray(start: model.start, end: model.end, stops: model.stops)
+        let markerJson = markersToJsonArray(start: snapshot.start, end: snapshot.end, stops: snapshot.stops)
         do {
             let features = try JSONDecoder().decode([Feature].self, from: markerJson.data(using: .utf8)!)
             let geojson = GeoJSONObject.featureCollection(FeatureCollection(features: features))
@@ -447,7 +531,15 @@ class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    func moveCamera(points path: [CLLocationCoordinate2D], animate _: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
+    nonisolated func moveCamera(points path: [CLLocationCoordinate2D], animate _: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
+        // Synchronous on the caller as it always was (the directions renderer calls this on the main actor);
+        // off main it logs and hops, per the shared policy.
+        mpOnMainSync("MBRouteRenderer.moveCamera") {
+            moveCameraOnMain(points: path, durationMs: durationMs, tilt: tilt, fitMode: fitMode, padding: padding, maxZoom: maxZoom)
+        }
+    }
+
+    private func moveCameraOnMain(points path: [CLLocationCoordinate2D], durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
         guard let mapView, path.count >= 2 else { return }
 
         let bounds = MPGeoBounds(points: path).adjustedTo(maxZoom: maxZoom, mapViewHeight: Double(mapView.frame.width), mapViewWidth: Double(mapView.frame.width))
@@ -496,8 +588,8 @@ class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    func clear() {
-        DispatchQueue.main.async { [weak self] in
+    nonisolated func clear() {
+        Task { @MainActor [weak self] in
             self?.clearOnMain()
         }
     }
