@@ -129,12 +129,14 @@ final class MBRouteRenderer: MPRouteRenderer {
     /// a mutable class owned by Core; the view models it carries are `Sendable` already.
     private struct RouteSnapshot: Sendable {
         let polyline: [CLLocationCoordinate2D]
+        let elevations: [Double]?
         let start: (any MPViewModel)?
         let end: (any MPViewModel)?
         let stops: [any MPViewModel]
 
         init(_ model: RouteViewModelProducer) {
             polyline = model.polyline
+            elevations = model.elevations?.count == model.polyline.count ? model.elevations : nil
             start = model.start
             end = model.end
             stops = model.stops ?? []
@@ -150,6 +152,8 @@ final class MBRouteRenderer: MPRouteRenderer {
         if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) == false {
             var lineSource = GeoJSONSource(id: Constants.SourceIDs.lineSource)
             lineSource.data = .geometry(LineString([]).geometry)
+            // lineMetrics enables line-progress, which a route's elevation profile is keyed on.
+            lineSource.lineMetrics = true
             do {
                 try mapView.mapboxMap.addSource(lineSource)
             } catch {
@@ -419,6 +423,10 @@ final class MBRouteRenderer: MPRouteRenderer {
         // Lift / ground the whole route. Runs on every apply, outside the animate branch (so the overlay is
         // elevated too) and unconditionally (so grounding a previously elevated route always resets).
         applyElevation(elevated: elevated, height: elevationHeight, on: mapView)
+        placeRouteLines(aboveExtrusions: snapshot.elevations != nil, on: mapView)
+        if let elevations = snapshot.elevations {
+            applyElevationProfile(elevations, along: snapshot.polyline, base: elevated ? max(elevationHeight, 0) : 0, on: mapView)
+        }
 
         // A programmatic re-render on an idle map (e.g. a late icon download, an options toggle) does not
         // repaint on its own — force one so the update shows without needing a camera move.
@@ -453,6 +461,75 @@ final class MBRouteRenderer: MPRouteRenderer {
             try? mapView.mapboxMap.setLayerProperty(for: layer, property: "symbol-elevation-reference", value: values.symbolReference)
             try? mapView.mapboxMap.setLayerProperty(for: layer, property: "symbol-z-offset", value: values.zOffset)
         }
+    }
+
+    /// Most heights an elevation profile is resampled into; spacing grows on longer routes.
+    nonisolated static let maxProfileSamples = 1024
+    /// Spacing of the resampled profile, in meters.
+    nonisolated static let profileSampleSpacing = 0.5
+
+    /// `line-z-offset` that follows a route's elevation profile, plus `base`. The property is a layout
+    /// property that can't be interpolated, so the profile is resampled to evenly spaced heights along
+    /// the line and looked up with `at-interpolated` on `line-progress`. Pure, so it is unit-testable
+    /// without a map.
+    nonisolated static func zOffsetExpression(heights: [Double], along points: [CLLocationCoordinate2D], base: Double) -> [Any] {
+        var distances = [0.0]
+        for (a, b) in zip(points, points.dropFirst()) {
+            distances.append(distances[distances.count - 1] + MPRouteElevationProfile.distance(a, b))
+        }
+        let total = distances.last ?? 0
+        guard total > 0, heights.count == points.count else { return ["literal", base] }
+
+        let count = min(maxProfileSamples, max(2, Int((total / profileSampleSpacing).rounded(.up)) + 1))
+        var samples = [Double]()
+        samples.reserveCapacity(count)
+        var segment = 0
+        for k in 0..<count {
+            let distance = total * Double(k) / Double(count - 1)
+            while segment < distances.count - 2, distances[segment + 1] < distance { segment += 1 }
+            let span = distances[segment + 1] - distances[segment]
+            let t = span > 0 ? (distance - distances[segment]) / span : 0
+            samples.append(heights[segment] + (heights[segment + 1] - heights[segment]) * min(max(t, 0), 1) + base)
+        }
+        return ["at-interpolated", ["*", ["line-progress"], Double(count - 1)], ["literal", samples]]
+    }
+
+    /// The route's line layers, bottom first.
+    private nonisolated static let routeLineLayerIds = [
+        Constants.LayerIDs.lineLayer, Constants.LayerIDs.baseLineLayer, Constants.LayerIDs.animatedLineLayer, Constants.LayerIDs.stampLayer,
+    ]
+
+    /// Lines don't write depth, so extrusions drawn after them paint over them even where the line is
+    /// higher. An elevated route therefore goes above the extrusion layers; a route on the floor stays
+    /// below them, where walls and extrusions still hide the parts behind them.
+    private func placeRouteLines(aboveExtrusions: Bool, on mapView: MapView) {
+        var position: LayerPosition = aboveExtrusions ? .above(Constants.LayerIDs.featureExtrusionLayer) : .below(Constants.LayerIDs.model3DLayer)
+        for id in MBRouteRenderer.routeLineLayerIds where mapView.mapboxMap.layerExists(withId: id) {
+            do {
+                try mapView.mapboxMap.moveLayer(withId: id, to: position)
+            } catch {
+                MPLog.mapbox.error("Could not move route layer \(id): \(error)")
+            }
+            position = .above(id)
+        }
+    }
+
+    /// Draws the route on top of sloped and raised locations. Repeating stamps can only take one height,
+    /// so they are hidden rather than left buried under raised parts; markers carry their own `zOffset`.
+    private func applyElevationProfile(_ heights: [Double], along points: [CLLocationCoordinate2D], base: Double, on mapView: MapView) {
+        let zOffset = MBRouteRenderer.zOffsetExpression(heights: heights, along: points, base: base)
+        for layer in [Constants.LayerIDs.lineLayer, Constants.LayerIDs.baseLineLayer, Constants.LayerIDs.animatedLineLayer] {
+            do {
+                try mapView.mapboxMap.setLayerProperty(for: layer, property: "line-elevation-reference", value: "ground")
+                try mapView.mapboxMap.setLayerProperty(for: layer, property: "line-z-offset", value: zOffset)
+            } catch {
+                MPLog.mapbox.error("Route elevation profile rejected for \(layer): \(error)")
+            }
+        }
+        try? mapView.mapboxMap.setLayerProperty(for: Constants.LayerIDs.stampLayer, property: "visibility", value: "none")
+        try? mapView.mapboxMap.setLayerProperty(
+            for: Constants.LayerIDs.routeMarkerLayer, property: "symbol-z-offset",
+            value: ["+", ["coalesce", ["get", Key.zOffset.rawValue], 0], base])
     }
 
     /// Drives continuous map rendering for the lifetime of a running animation, WITHOUT moving the camera:

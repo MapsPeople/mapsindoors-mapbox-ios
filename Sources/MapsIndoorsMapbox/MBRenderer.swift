@@ -77,6 +77,9 @@ class MBRenderer {
             try configureGraphicLabelsLayer()
             try configureMarkerLayer(layerId: Constants.LayerIDs.markerLayer)
             try configureMarkerLayer(layerId: Constants.LayerIDs.markerNoCollisionLayer)
+            for layerId in [Constants.LayerIDs.markerLayer, Constants.LayerIDs.markerNoCollisionLayer, Constants.LayerIDs.flatLabelsLayer, Constants.LayerIDs.graphicLabelsLayer] {
+                configureSymbolElevation(layerId: layerId)
+            }
             try configurePolygonLayers()
             try configureFloorPlanLayer()
             try configure2DModelLayer()
@@ -320,22 +323,41 @@ class MBRenderer {
         }
     }
 
+    /// Polygons and 2D-model footprints, except raised ones: a fill can't be lifted per feature, so
+    /// those are drawn as slabs in the feature extrusion layer instead.
+    nonisolated static let groundedPolygonFilter = Exp(.all) {
+        Exp(.any) {
+            Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+            }
+            Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+            }
+        }
+        Exp(.lte) {
+            Exp(.coalesce) {
+                Exp(.get) { Key.zOffset.rawValue }
+                0
+            }
+            0
+        }
+    }
+
+    /// Lifts symbols of raised locations. Set through the string API, as the typed accessor is
+    /// `@_spi(Experimental)`.
+    private func configureSymbolElevation(layerId: String) {
+        try? map?.setLayerProperty(for: layerId, property: "symbol-z-offset", value: ["coalesce", ["get", Key.zOffset.rawValue], 0])
+    }
+
     private func configurePolygonLayers() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.polygonFillLayer, type: FillLayer.self) { layerUpdate in
             layerUpdate.fillColor = .expression(Exp(.get) { Key.polygonFillcolor.rawValue })
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.polygonFillOpacity.rawValue })
             layerUpdate.fillSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.polygonArea.rawValue } })
 
-            layerUpdate.filter = Exp(.any) {
-                Exp(.eq) {
-                    Exp(.get) { Key.type.rawValue }
-                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
-                }
-                Exp(.eq) {
-                    Exp(.get) { Key.type.rawValue }
-                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
-                }
-            }
+            layerUpdate.filter = Self.groundedPolygonFilter
         }
 
         try map?.updateLayer(withId: Constants.LayerIDs.polygonLineLayer, type: LineLayer.self) { layerUpdate in
@@ -344,16 +366,7 @@ class MBRenderer {
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.polygonStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
 
-            layerUpdate.filter = Exp(.any) {
-                Exp(.eq) {
-                    Exp(.get) { Key.type.rawValue }
-                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
-                }
-                Exp(.eq) {
-                    Exp(.get) { Key.type.rawValue }
-                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
-                }
-            }
+            layerUpdate.filter = Self.groundedPolygonFilter
         }
     }
 
@@ -507,6 +520,12 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.wallExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.wallExtrusionHeight.rawValue })
+            // Only raised locations set a base; other walls start at the floor.
+            layerUpdate.fillExtrusionBase = .expression(
+                Exp(.coalesce) {
+                    Exp(.get) { Key.wallExtrusionBase.rawValue }
+                    0
+                })
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -519,6 +538,12 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.featureExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.featureExtrusionHeight.rawValue })
+            // Only slope bands set a base; plain extrusions start at the floor.
+            layerUpdate.fillExtrusionBase = .expression(
+                Exp(.coalesce) {
+                    Exp(.get) { Key.featureExtrusionBase.rawValue }
+                    0
+                })
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -685,7 +710,7 @@ class MBRenderer {
         let model2DGeometryFeature: Feature?
         let model3DFeature: Feature?
         let wallExtrusionFeature: Feature?
-        let featureExtrusionFeature: Feature?
+        let featureExtrusionFeatures: [Feature]
     }
 
     /// Test instrumentation: the peak number of `render` bodies running
@@ -724,7 +749,7 @@ class MBRenderer {
                     model2DGeometryFeature: is2dModelsEnabled ? model.model2DGeometryFeature : nil,
                     model3DFeature: model.model3DFeature,
                     wallExtrusionFeature: isWallExtrusionsEnabled ? model.wallExtrusionFeature : nil,
-                    featureExtrusionFeature: isFeatureExtrusionsEnabled ? model.featureExtrusionFeature : nil
+                    featureExtrusionFeatures: isFeatureExtrusionsEnabled ? model.featureExtrusionFeatures : []
                 ))
         }
 
@@ -811,9 +836,7 @@ class MBRenderer {
 
                     try Task.checkCancellation()
 
-                    if let featureExtrusionLayer = input.featureExtrusionFeature {
-                        featuresExtrusions.append(featureExtrusionLayer)
-                    }
+                    featuresExtrusions.append(contentsOf: input.featureExtrusionFeatures)
 
                     try Task.checkCancellation()
 
@@ -1052,7 +1075,7 @@ class MBRenderer {
 
 /// We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
 extension MPViewModel {
-    fileprivate var markerFeature: Feature? {
+    var markerFeature: Feature? {
         guard let marker else { return nil }
 
         var feature = Feature(geometry: marker.geometry.featureGeometry())
@@ -1089,6 +1112,7 @@ extension MPViewModel {
         }
         if let markerType = (marker.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(markerType) }
         if let clickable = marker.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
+        if let zOffset = marker.properties[.zOffset] as? Double { feature.properties?[Key.zOffset.rawValue] = JSONValue(zOffset) }
 
         return feature
     }
@@ -1111,6 +1135,7 @@ extension MPViewModel {
         if let polygonArea = polygon.properties[.polygonArea] as? Double { feature.properties?[Key.polygonArea.rawValue] = JSONValue(polygonArea) }
         if let polygonType = (polygon.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(polygonType) }
         if let clickable = polygon.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
+        if let zOffset = polygon.properties[.zOffset] as? Double { feature.properties?[Key.zOffset.rawValue] = JSONValue(zOffset) }
 
         return feature
     }
@@ -1224,10 +1249,34 @@ extension MPViewModel {
         feature.properties = JSONObject()
         if let wallExtrusionColor = wallExtrusion.properties[.wallExtrusionColor] as? String { feature.properties?[Key.wallExtrusionColor.rawValue] = JSONValue(wallExtrusionColor) }
         if let wallExtrusionHeight = wallExtrusion.properties[.wallExtrusionHeight] as? Double { feature.properties?[Key.wallExtrusionHeight.rawValue] = JSONValue(wallExtrusionHeight) }
+        if let wallExtrusionBase = wallExtrusion.properties[.wallExtrusionBase] as? Double { feature.properties?[Key.wallExtrusionBase.rawValue] = JSONValue(wallExtrusionBase) }
         if let wallExtrusionType = (wallExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(wallExtrusionType) }
         if let clickable = wallExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
+    }
+
+    /// One feature per slope band when the extrusion carries bands, else the plain extrusion.
+    var featureExtrusionFeatures: [Feature] {
+        guard let featureExtrusion else { return [] }
+        guard let bands = featureExtrusion.properties[.featureExtrusionBands] as? [MPSlopeBand] else {
+            return featureExtrusionFeature.map { [$0] } ?? []
+        }
+
+        let color = featureExtrusion.properties[.featureExtrusionColor] as? String
+        let clickable = featureExtrusion.properties[.clickable] as? Bool
+        return bands.map { band in
+            let rings = band.rings.map { ring in ring.map { CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0]) } }
+            var feature = Feature(geometry: Polygon(rings))
+            feature.identifier = .string(id)
+            feature.properties = JSONObject()
+            if let color { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(color) }
+            feature.properties?[Key.featureExtrusionBase.rawValue] = JSONValue(band.base)
+            feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(band.height)
+            feature.properties?[Key.type.rawValue] = JSONValue(MPRenderedFeatureType.featureExtrusion.rawValue)
+            if let clickable { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
+            return feature
+        }
     }
 
     fileprivate var featureExtrusionFeature: Feature? {
@@ -1239,6 +1288,7 @@ extension MPViewModel {
         feature.properties = JSONObject()
         if let featureExtrusionColor = featureExtrusion.properties[.featureExtrusionColor] as? String { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(featureExtrusionColor) }
         if let featureExtrusionHeight = featureExtrusion.properties[.featureExtrusionHeight] as? Double { feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(featureExtrusionHeight) }
+        if let featureExtrusionBase = featureExtrusion.properties[.featureExtrusionBase] as? Double { feature.properties?[Key.featureExtrusionBase.rawValue] = JSONValue(featureExtrusionBase) }
         if let featureExtrusionType = (featureExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(featureExtrusionType) }
         if let clickable = featureExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
