@@ -308,6 +308,10 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// render. Public for the same reason as `collisionHandling` above — the protocol requires it.
     public var expandedTapAreaEnabled: Bool = true
 
+    /// Convention group (see the SAFETY block): written by `MPMapControlInternal` when it is created, read by
+    /// `MBCameraOperator` and the directions renderer, all on the main actor (SPEX-2060).
+    public var cameraAnimationsEnabled: Bool = true
+
     public var routeRenderer: MPRouteRenderer {
         // The fallback renderer registers sources on the map, which is main-actor state; see `mpOnMainSync`.
         _routeRenderer ?? mpOnMainSync("MapBoxProvider.routeRenderer") { MBRouteRenderer(mapView: mapView) }

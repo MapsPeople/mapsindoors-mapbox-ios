@@ -531,15 +531,15 @@ final class MBRouteRenderer: MPRouteRenderer {
         }
     }
 
-    nonisolated func moveCamera(points path: [CLLocationCoordinate2D], animate _: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
+    nonisolated func moveCamera(points path: [CLLocationCoordinate2D], animate: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
         // Synchronous on the caller as it always was (the directions renderer calls this on the main actor);
         // off main it logs and hops, per the shared policy.
         mpOnMainSync("MBRouteRenderer.moveCamera") {
-            moveCameraOnMain(points: path, durationMs: durationMs, tilt: tilt, fitMode: fitMode, padding: padding, maxZoom: maxZoom)
+            moveCameraOnMain(points: path, animate: animate, durationMs: durationMs, tilt: tilt, fitMode: fitMode, padding: padding, maxZoom: maxZoom)
         }
     }
 
-    private func moveCameraOnMain(points path: [CLLocationCoordinate2D], durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
+    private func moveCameraOnMain(points path: [CLLocationCoordinate2D], animate: Bool, durationMs: Int, tilt: Float, fitMode: MPCameraViewFitMode, padding: UIEdgeInsets, maxZoom: Double?) {
         guard let mapView, path.count >= 2 else { return }
 
         let bounds = MPGeoBounds(points: path).adjustedTo(maxZoom: maxZoom, mapViewHeight: Double(mapView.frame.width), mapViewWidth: Double(mapView.frame.width))
@@ -581,7 +581,13 @@ final class MBRouteRenderer: MPRouteRenderer {
                 // is a no-op when pitch is 0 and the existing camera
                 // padding already equals `padding`.
                 camOptions.padding = padding
-                mapView.camera.fly(to: camOptions, duration: Double(durationMs) / 5000.0, completion: nil)
+                // `animate` is decided by the directions renderer (host flag plus Reduce Motion, SPEX-2060);
+                // the instant path sets the camera in place rather than flying for zero seconds.
+                if animate {
+                    mapView.camera.fly(to: camOptions, duration: Double(durationMs) / 5000.0, completion: nil)
+                } else {
+                    mapView.mapboxMap.setCamera(to: camOptions)
+                }
             } catch {
                 MPLog.mapbox.error("Error trying to move Mapbox camera!")
             }

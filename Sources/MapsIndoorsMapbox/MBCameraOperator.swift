@@ -1,9 +1,39 @@
 import Foundation
 import MapboxMaps
-import MapsIndoorsCore
+@_spi(Private) import MapsIndoorsCore
+
+/// The two camera verbs the operator uses, behind a protocol so a test can see which one a move took: a map view
+/// that is not on screen sometimes lands an ease instantly and sometimes not at all, so the camera state cannot
+/// tell the eased path from the instant one (SPEX-2060).
+@MainActor
+protocol MBCameraDriving: AnyObject {
+    func setCamera(to camera: CameraOptions)
+    func ease(to camera: CameraOptions, completion: @escaping () -> Void)
+}
+
+/// The production driver: the map view's own camera.
+@MainActor
+final class MBMapViewCameraDriver: MBCameraDriving {
+    private weak var view: MapView?
+
+    init(view: MapView) {
+        self.view = view
+    }
+
+    func setCamera(to camera: CameraOptions) {
+        view?.mapboxMap.setCamera(to: camera)
+    }
+
+    func ease(to camera: CameraOptions, completion: @escaping () -> Void) {
+        view?.camera.ease(to: camera, duration: 0.3) { _ in completion() }
+    }
+}
 
 @MainActor
 class MBCameraOperator: MPCameraOperator {
+    /// Test injection point for the camera verbs; `nil` drives the map view (SPEX-2060).
+    var cameraDriverOverride: (any MBCameraDriving)?
+
     /// SAFETY: written only by the initialisers, before the operator is handed out, and read only on the main
     /// actor afterwards. `nonisolated(unsafe)` because a weak property starts as `nil`, so the non-isolated
     /// initialiser's first write counts as a mutation of main-actor state rather than an initialisation.
@@ -37,21 +67,13 @@ class MBCameraOperator: MPCameraOperator {
             zoom: CGFloat(pos.zoom),
             bearing: pos.bearing,
             pitch: pos.viewingAngle)
-        await withCheckedContinuation { continuation in
-            self.view?.camera.ease(to: newCamera, duration: 0.3) { _ in
-                continuation.resume()
-            }
-        }
+        await apply(newCamera)
     }
 
     func animate(bounds: MPGeoBounds) async {
         do {
             if let newCamera = try view?.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(), coordinatesPadding: mapProvider?.padding, maxZoom: nil, offset: nil) {
-                await withCheckedContinuation { continuation in
-                    view?.camera.ease(to: newCamera, duration: 0.3) { _ in
-                        continuation.resume()
-                    }
-                }
+                await apply(newCamera)
             }
         } catch {
             MPLog.mapbox.error("Error trying to animate mapbox camera to bounds!")
@@ -70,10 +92,23 @@ class MBCameraOperator: MPCameraOperator {
                 center: target,
                 padding: mapProvider?.padding,
                 zoom: CGFloat(zoom))
-            await withCheckedContinuation { continuation in
-                self.view?.camera.ease(to: newCamera, duration: 0.3) { _ in
-                    continuation.resume()
-                }
+            await apply(newCamera)
+        }
+    }
+
+    /// Eases to `camera` and returns when the ease has finished, or, when motion is not allowed for this map
+    /// (host flag or Reduce Motion, see `MPCameraMotion`), sets it in place and returns at once (SPEX-2060).
+    /// The instant path goes through `setCamera` rather than a zero-duration ease, so the camera is already
+    /// there when the caller resumes and no animator is started at all.
+    private func apply(_ camera: CameraOptions) async {
+        guard let driver = cameraDriverOverride ?? view.map(MBMapViewCameraDriver.init(view:)) else { return }
+        guard MPCameraMotion.shouldAnimate(for: mapProvider) else {
+            driver.setCamera(to: camera)
+            return
+        }
+        await withCheckedContinuation { continuation in
+            driver.ease(to: camera) {
+                continuation.resume()
             }
         }
     }
