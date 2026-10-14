@@ -42,11 +42,6 @@ final class MBRouteRenderer: MPRouteRenderer {
     // e.g. an old flow tick re-trimming the line right after a live switch to pulse.
     private var animationGeneration = 0
 
-    /// Follows the camera while an elevated route has stamps, to thin them out by zoom.
-    private var stampZoomToken: AnyCancelable?
-    /// The zoom the elevated stamps' filter was last written for.
-    private var stampFilterZoom: Int?
-
     /// Internal (read-only) so tests can check what `apply` and `clear` leave behind.
     private(set) var route = [CLLocationCoordinate2D]()
 
@@ -134,14 +129,12 @@ final class MBRouteRenderer: MPRouteRenderer {
     /// a mutable class owned by Core; the view models it carries are `Sendable` already.
     private struct RouteSnapshot: Sendable {
         let polyline: [CLLocationCoordinate2D]
-        let elevations: [Double]?
         let start: (any MPViewModel)?
         let end: (any MPViewModel)?
         let stops: [any MPViewModel]
 
         init(_ model: RouteViewModelProducer) {
             polyline = model.polyline
-            elevations = model.elevations?.count == model.polyline.count ? model.elevations : nil
             start = model.start
             end = model.end
             stops = model.stops ?? []
@@ -157,8 +150,6 @@ final class MBRouteRenderer: MPRouteRenderer {
         if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.lineSource) == false {
             var lineSource = GeoJSONSource(id: Constants.SourceIDs.lineSource)
             lineSource.data = .geometry(LineString([]).geometry)
-            // lineMetrics enables line-progress, which a route's elevation profile is keyed on.
-            lineSource.lineMetrics = true
             do {
                 try mapView.mapboxMap.addSource(lineSource)
             } catch {
@@ -186,16 +177,6 @@ final class MBRouteRenderer: MPRouteRenderer {
                 try mapView.mapboxMap.addSource(markerSource)
             } catch {
                 MPLog.mapbox.debug("Error setting up marker source in route renderer!")
-            }
-        }
-
-        if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.elevatedStampSource) == false {
-            var stampSource = GeoJSONSource(id: Constants.SourceIDs.elevatedStampSource)
-            stampSource.data = .featureCollection(FeatureCollection(features: [Feature]()))
-            do {
-                try mapView.mapboxMap.addSource(stampSource)
-            } catch {
-                MPLog.mapbox.debug("Error setting up elevated stamp source in route renderer!")
             }
         }
     }
@@ -310,7 +291,6 @@ final class MBRouteRenderer: MPRouteRenderer {
         let stampImage = style.stampImage
         let stampSpacing = style.stampSpacing
         let stampSize = style.stampSize
-        let stampIconSize = stampImage.map { stampSize / max(Double(max($0.size.width, $0.size.height)), 1) }
         do {
             try mapView.mapboxMap.updateLayer(withId: Constants.LayerIDs.stampLayer, type: SymbolLayer.self) { stampLayer in
                 // source is fixed at layer creation (MapboxMap+Extension); it isn't settable via updateLayer in v11.
@@ -320,7 +300,8 @@ final class MBRouteRenderer: MPRouteRenderer {
                 stampLayer.iconAllowOverlap = .constant(true)
                 stampLayer.iconIgnorePlacement = .constant(true)
             }
-            if let stampImage, let iconScale = stampIconSize {
+            if let stampImage {
+                let iconScale = stampSize / max(Double(max(stampImage.size.width, stampImage.size.height)), 1)
                 // try? (not try) so a failed image registration can't skip the layer-property writes below.
                 try? mapView.mapboxMap.addImage(stampImage, id: MBRouteRenderer.stampImageID, sdf: false)
                 try? mapView.mapboxMap.setLayerProperty(for: Constants.LayerIDs.stampLayer, property: "icon-image", value: MBRouteRenderer.stampImageID)
@@ -438,15 +419,6 @@ final class MBRouteRenderer: MPRouteRenderer {
         // Lift / ground the whole route. Runs on every apply, outside the animate branch (so the overlay is
         // elevated too) and unconditionally (so grounding a previously elevated route always resets).
         applyElevation(elevated: elevated, height: elevationHeight, on: mapView)
-        placeRouteLines(aboveExtrusions: snapshot.elevations != nil, on: mapView)
-        let profileBase = elevated ? max(elevationHeight, 0) : 0
-        if let elevations = snapshot.elevations {
-            applyElevationProfile(elevations, along: snapshot.polyline, base: profileBase, on: mapView)
-        }
-        let elevatedStamps = snapshot.elevations.flatMap { heights in
-            stampIconSize.map { _ in MBRouteRenderer.elevatedStamps(heights: heights, along: snapshot.polyline, base: profileBase, spacing: stampSpacing) }
-        }
-        applyElevatedStamps(elevatedStamps ?? [], iconSize: stampIconSize ?? 1, on: mapView)
 
         // A programmatic re-render on an idle map (e.g. a late icon download, an options toggle) does not
         // repaint on its own — force one so the update shows without needing a camera move.
@@ -480,204 +452,6 @@ final class MBRouteRenderer: MPRouteRenderer {
         for layer in [Constants.LayerIDs.stampLayer, Constants.LayerIDs.routeMarkerLayer] {
             try? mapView.mapboxMap.setLayerProperty(for: layer, property: "symbol-elevation-reference", value: values.symbolReference)
             try? mapView.mapboxMap.setLayerProperty(for: layer, property: "symbol-z-offset", value: values.zOffset)
-        }
-    }
-
-    /// Most heights an elevation profile is resampled into; spacing grows on longer routes.
-    nonisolated static let maxProfileSamples = 1024
-    /// Spacing of the resampled profile, in meters.
-    nonisolated static let profileSampleSpacing = 0.5
-
-    /// `line-z-offset` that follows a route's elevation profile, plus `base`. The property is a layout
-    /// property that can't be interpolated, so the profile is resampled to evenly spaced heights along
-    /// the line and looked up with `at-interpolated` on `line-progress`. Pure, so it is unit-testable
-    /// without a map.
-    nonisolated static func zOffsetExpression(heights: [Double], along points: [CLLocationCoordinate2D], base: Double) -> [Any] {
-        var distances = [0.0]
-        for (a, b) in zip(points, points.dropFirst()) {
-            distances.append(distances[distances.count - 1] + MPRouteElevationProfile.distance(a, b))
-        }
-        let total = distances.last ?? 0
-        guard total > 0, heights.count == points.count else { return ["literal", base] }
-
-        let count = min(maxProfileSamples, max(2, Int((total / profileSampleSpacing).rounded(.up)) + 1))
-        var samples = [Double]()
-        samples.reserveCapacity(count)
-        var segment = 0
-        for k in 0..<count {
-            let distance = total * Double(k) / Double(count - 1)
-            while segment < distances.count - 2, distances[segment + 1] < distance { segment += 1 }
-            let span = distances[segment + 1] - distances[segment]
-            let t = span > 0 ? (distance - distances[segment]) / span : 0
-            samples.append(heights[segment] + (heights[segment + 1] - heights[segment]) * min(max(t, 0), 1) + base)
-        }
-        return ["at-interpolated", ["*", ["line-progress"], Double(count - 1)], ["literal", samples]]
-    }
-
-    /// The route's line layers, bottom first.
-    private nonisolated static let routeLineLayerIds = [
-        Constants.LayerIDs.lineLayer, Constants.LayerIDs.baseLineLayer, Constants.LayerIDs.animatedLineLayer, Constants.LayerIDs.stampLayer,
-        Constants.LayerIDs.elevatedStampLayer,
-    ]
-
-    /// Lines don't write depth, so extrusions drawn after them paint over them even where the line is
-    /// higher. An elevated route therefore goes above the extrusion layers; a route on the floor stays
-    /// below them, where walls and extrusions still hide the parts behind them.
-    private func placeRouteLines(aboveExtrusions: Bool, on mapView: MapView) {
-        var position: LayerPosition = aboveExtrusions ? .above(Constants.LayerIDs.featureExtrusionLayer) : .below(Constants.LayerIDs.model3DLayer)
-        for id in MBRouteRenderer.routeLineLayerIds where mapView.mapboxMap.layerExists(withId: id) {
-            do {
-                try mapView.mapboxMap.moveLayer(withId: id, to: position)
-            } catch {
-                MPLog.mapbox.error("Could not move route layer \(id): \(error)")
-            }
-            position = .above(id)
-        }
-    }
-
-    /// Draws the route on top of sloped and raised locations. Line-placed stamps can only take one height,
-    /// so they are hidden and `applyElevatedStamps` draws them instead; markers carry their own `zOffset`.
-    private func applyElevationProfile(_ heights: [Double], along points: [CLLocationCoordinate2D], base: Double, on mapView: MapView) {
-        let zOffset = MBRouteRenderer.zOffsetExpression(heights: heights, along: points, base: base)
-        for layer in [Constants.LayerIDs.lineLayer, Constants.LayerIDs.baseLineLayer, Constants.LayerIDs.animatedLineLayer] {
-            do {
-                try mapView.mapboxMap.setLayerProperty(for: layer, property: "line-elevation-reference", value: "ground")
-                try mapView.mapboxMap.setLayerProperty(for: layer, property: "line-z-offset", value: zOffset)
-            } catch {
-                MPLog.mapbox.error("Route elevation profile rejected for \(layer): \(error)")
-            }
-        }
-        try? mapView.mapboxMap.setLayerProperty(for: Constants.LayerIDs.stampLayer, property: "visibility", value: "none")
-        try? mapView.mapboxMap.setLayerProperty(
-            for: Constants.LayerIDs.routeMarkerLayer, property: "symbol-z-offset",
-            value: ["+", ["coalesce", ["get", Key.zOffset.rawValue], 0], base])
-    }
-
-    /// A stamp on an elevated route.
-    struct ElevatedStamp {
-        let coordinate: CLLocationCoordinate2D
-        /// Direction of travel, degrees clockwise from north.
-        let bearing: Double
-        /// Height above the floor, base included, in meters.
-        let height: Double
-        /// Lowest zoom the stamp shows at.
-        let minZoom: Int
-    }
-
-    /// Zoom at which elevated stamps are `stampSpacing` apart; above it they spread out.
-    nonisolated static let elevatedStampMaxZoom = 22
-    /// Zoom below which elevated stamps are no longer thinned out.
-    nonisolated static let elevatedStampMinZoom = 14
-    nonisolated static let maxElevatedStamps = 4096
-
-    /// Stamps along an elevated route, each at its own height. Line-placed symbols are `stampSpacing`
-    /// screen points apart, but these are fixed on the ground, so every zoom halves the set: a stamp shows
-    /// from `minZoom`, keeping the on-screen spacing within a factor √2 of `spacing`. Pure, so it is
-    /// unit-testable without a map.
-    nonisolated static func elevatedStamps(heights: [Double], along points: [CLLocationCoordinate2D], base: Double, spacing: Double) -> [ElevatedStamp] {
-        guard points.count >= 2, heights.count == points.count, spacing > 0 else { return [] }
-        var distances = [0.0]
-        for (a, b) in zip(points, points.dropFirst()) {
-            distances.append(distances[distances.count - 1] + MPRouteElevationProfile.distance(a, b))
-        }
-        let total = distances[distances.count - 1]
-        guard total > 0 else { return [] }
-
-        // Ground length of `spacing` points at a zoom; Mapbox zoom levels are based on 512-point tiles.
-        let metersPerPointAtZoom0 = 40_075_016.686 * cos(points[0].latitude.radians) / 512
-        func groundSpacing(_ zoom: Int) -> Double { spacing * metersPerPointAtZoom0 / pow(2, Double(zoom)) }
-        var maxZoom = elevatedStampMaxZoom
-        while maxZoom > elevatedStampMinZoom, total / groundSpacing(maxZoom) > Double(maxElevatedStamps) { maxZoom -= 1 }
-        let step = groundSpacing(maxZoom)
-        let levels = maxZoom - elevatedStampMinZoom
-
-        var stamps = [ElevatedStamp]()
-        var segment = 0
-        var index = 0
-        var distance = step / 2
-        while distance < total, stamps.count < maxElevatedStamps {
-            while segment < distances.count - 2, distances[segment + 1] < distance { segment += 1 }
-            let a = points[segment]
-            let b = points[segment + 1]
-            let span = distances[segment + 1] - distances[segment]
-            let t = span > 0 ? min(max((distance - distances[segment]) / span, 0), 1) : 0
-            // Every 2^n-th stamp stays n zooms further out.
-            let level = index == 0 ? levels : min(index.trailingZeroBitCount, levels)
-            stamps.append(
-                ElevatedStamp(
-                    coordinate: CLLocationCoordinate2D(latitude: a.latitude + (b.latitude - a.latitude) * t, longitude: a.longitude + (b.longitude - a.longitude) * t),
-                    bearing: MPGeometryUtils.bearingBetweenPoints(from: a, to: b),
-                    height: heights[segment] + (heights[segment + 1] - heights[segment]) * t + base,
-                    minZoom: maxZoom - level))
-            index += 1
-            distance += step
-        }
-        return stamps
-    }
-
-    private nonisolated static let stampBearingKey = "bearing"
-    private nonisolated static let stampMinZoomKey = "minZoom"
-
-    /// Draws `stamps` with the stamp image already registered; hides the layer when there are none.
-    private func applyElevatedStamps(_ stamps: [ElevatedStamp], iconSize: Double, on mapView: MapView) {
-        let layer = Constants.LayerIDs.elevatedStampLayer
-        let features = stamps.map { stamp in
-            var feature = Feature(geometry: .point(Point(stamp.coordinate)))
-            feature.properties = [
-                MBRouteRenderer.stampBearingKey: .number(stamp.bearing),
-                Key.zOffset.rawValue: .number(stamp.height),
-                MBRouteRenderer.stampMinZoomKey: .number(Double(stamp.minZoom)),
-            ]
-            return feature
-        }
-        if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.elevatedStampSource) {
-            mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.elevatedStampSource, geoJSON: .featureCollection(FeatureCollection(features: features)))
-        }
-        stampZoomToken?.cancel()
-        stampZoomToken = nil
-        stampFilterZoom = nil
-        guard stamps.isEmpty == false else {
-            try? mapView.mapboxMap.setLayerProperty(for: layer, property: "visibility", value: "none")
-            return
-        }
-        // The stamp image points along the line, i.e. east at no rotation.
-        let properties: [String: Any] = [
-            "icon-image": MBRouteRenderer.stampImageID,
-            "icon-size": iconSize,
-            "icon-rotate": ["-", ["get", MBRouteRenderer.stampBearingKey], 90],
-            "icon-rotation-alignment": "map",
-            "icon-pitch-alignment": "map",
-            "icon-allow-overlap": true,
-            "icon-ignore-placement": true,
-            "symbol-elevation-reference": "ground",
-            "symbol-z-offset": ["get", Key.zOffset.rawValue],
-            "visibility": "visible",
-        ]
-        for (property, value) in properties {
-            do {
-                try mapView.mapboxMap.setLayerProperty(for: layer, property: property, value: value)
-            } catch {
-                MPLog.mapbox.error("Elevated stamp \(property) rejected: \(error)")
-            }
-        }
-        updateElevatedStampFilter()
-        stampZoomToken = mapView.mapboxMap.onCameraChanged.observe { [weak self] _ in
-            self?.updateElevatedStampFilter()
-        }
-    }
-
-    /// Shows the stamps due at the camera's nearest whole zoom, rewritten only when that changes. A literal
-    /// rather than a `zoom` expression: with one in the filter, Mapbox 11.25 drew no stamps.
-    private func updateElevatedStampFilter() {
-        guard let mapView else { return }
-        let zoom = min(max(Int(mapView.mapboxMap.cameraState.zoom.rounded()), MBRouteRenderer.elevatedStampMinZoom), MBRouteRenderer.elevatedStampMaxZoom)
-        guard zoom != stampFilterZoom else { return }
-        stampFilterZoom = zoom
-        do {
-            try mapView.mapboxMap.setLayerProperty(
-                for: Constants.LayerIDs.elevatedStampLayer, property: "filter", value: ["<=", ["get", MBRouteRenderer.stampMinZoomKey], zoom])
-        } catch {
-            MPLog.mapbox.error("Elevated stamp filter rejected: \(error)")
         }
     }
 
@@ -857,7 +631,6 @@ final class MBRouteRenderer: MPRouteRenderer {
             // vanish with the emptied lineSource, but don't rely on that; keep teardown symmetric with the
             // Google renderer and avoid leaking the last route's stamp image in the style registry.
             try? mapView.mapboxMap.setLayerProperty(for: Constants.LayerIDs.stampLayer, property: "visibility", value: "none")
-            applyElevatedStamps([], iconSize: 1, on: mapView)
             if mapView.mapboxMap.imageExists(withId: MBRouteRenderer.stampImageID) {
                 try mapView.mapboxMap.removeImage(withId: MBRouteRenderer.stampImageID)
             }

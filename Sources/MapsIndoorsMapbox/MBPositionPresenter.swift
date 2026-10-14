@@ -18,11 +18,6 @@ final class MBPositionPresenter: MPPositionPresenter {
     private let layerBlueDotCircle = "LAYER_MP_BLUEDOT_CIRCLE"
     private let layerBlueDotMarker = "LAYER_MP_BLUEDOT_MARKER"
 
-    // Circle layers can't be lifted, so the accuracy circle of a raised position is a polygon instead.
-    private let srcBlueDotAccuracy = "SOURCE_MP_BLUEDOT_ACCURACY"
-    private let layerBlueDotAccuracyFill = "LAYER_MP_BLUEDOT_ACCURACY_FILL"
-    private let layerBlueDotAccuracyLine = "LAYER_MP_BLUEDOT_ACCURACY_LINE"
-
     private let blueDotIconId = "MP_BLUEDOT_ICON"
     private let blueDotCircleSizeId = "MP_BLUEDOT_CIRLCE_SIZE"
 
@@ -45,23 +40,6 @@ final class MBPositionPresenter: MPPositionPresenter {
         circleStrokeColor: UIColor,
         circleStrokeWidth: Double
     ) {
-        apply(
-            position: position, elevation: 0, markerIcon: markerIcon, markerBearing: markerBearing, markerOpacity: markerOpacity,
-            circleRadiusMeters: circleRadiusMeters, circleFillColor: circleFillColor, circleStrokeColor: circleStrokeColor,
-            circleStrokeWidth: circleStrokeWidth)
-    }
-
-    nonisolated func apply(
-        position: CLLocationCoordinate2D,
-        elevation: Double,
-        markerIcon: UIImage,
-        markerBearing: Double,
-        markerOpacity: Double,
-        circleRadiusMeters: Double,
-        circleFillColor: UIColor,
-        circleStrokeColor: UIColor,
-        circleStrokeWidth: Double
-    ) {
         // `map` is re-fetched after the hop: it is a weak var, and binding it here would let the dispatched
         // closure outlive the map.
         Task { @MainActor [weak self] in
@@ -69,7 +47,6 @@ final class MBPositionPresenter: MPPositionPresenter {
             applyBlueDotUpdate(
                 map: map,
                 position: position,
-                elevation: max(elevation, 0),
                 markerIcon: markerIcon,
                 markerOpacity: markerOpacity,
                 markerBearing: markerBearing,
@@ -83,7 +60,6 @@ final class MBPositionPresenter: MPPositionPresenter {
     private func applyBlueDotUpdate(
         map: MapboxMap,
         position: CLLocationCoordinate2D,
-        elevation: Double,
         markerIcon: UIImage,
         markerOpacity: Double,
         markerBearing: Double,
@@ -98,10 +74,9 @@ final class MBPositionPresenter: MPPositionPresenter {
         // positional move is redundant. Each step is also caught independently: a
         // throw in one (e.g. an updateLayer on a layer that failed to create) must
         // not skip the source and icon updates that actually place and draw the dot.
-        let elevated = elevation > 0
         do {
             try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
-                circleLayer.visibility = .constant(elevated ? .none : .visible)
+                circleLayer.visibility = .constant(.visible)
                 circleLayer.circleColor = .constant(StyleColor(circleFillColor))
                 circleLayer.circleOpacity = .constant(1 - circleFillColor.cgColor.alpha)
                 circleLayer.circleStrokeColor = .constant(StyleColor(circleStrokeColor))
@@ -129,12 +104,6 @@ final class MBPositionPresenter: MPPositionPresenter {
         } catch {
             MPLog.mapbox.error("Error updating blue dot marker layer: " + error.localizedDescription)
         }
-        // Imperative, as the z-offset is experimental API and its default (0, grounding the dot) must land too.
-        try? map.setLayerProperty(for: layerBlueDotMarker, property: "symbol-z-offset", value: elevation)
-
-        applyAccuracyPolygon(
-            map: map, position: position, elevation: elevated ? elevation : nil, radiusMeters: circleRadiusMeters,
-            fillColor: circleFillColor, strokeColor: circleStrokeColor, strokeWidth: circleStrokeWidth)
 
         let circleSize = circleRadiusMeters / (cos(position.latitude * (.pi / 180)) * 0.019)
         var bluedotFeature = Feature(geometry: .point(Point(position)))
@@ -148,70 +117,6 @@ final class MBPositionPresenter: MPPositionPresenter {
         } catch {
             MPLog.mapbox.error("Error adding blue dot marker image: " + error.localizedDescription)
         }
-    }
-
-    /// Draws the accuracy circle `elevation` meters up as a polygon and outline, or hides them for nil.
-    private func applyAccuracyPolygon(
-        map: MapboxMap, position: CLLocationCoordinate2D, elevation: Double?, radiusMeters: Double,
-        fillColor: UIColor, strokeColor: UIColor, strokeWidth: Double
-    ) {
-        guard let elevation else {
-            try? map.setLayerProperty(for: layerBlueDotAccuracyFill, property: "visibility", value: "none")
-            try? map.setLayerProperty(for: layerBlueDotAccuracyLine, property: "visibility", value: "none")
-            return
-        }
-        let ring = MBPositionPresenter.circleRing(center: position, radiusMeters: radiusMeters)
-        map.updateGeoJSONSource(withId: srcBlueDotAccuracy, geoJSON: .feature(Feature(geometry: .polygon(Polygon([ring])))))
-
-        // Opacities mirror the circle layer's.
-        let fill: [String: Any] = [
-            "fill-color": MBPositionPresenter.rgbaString(fillColor),
-            "fill-opacity": 1 - fillColor.cgColor.alpha,
-            "fill-emissive-strength": 1.0,
-            "fill-z-offset": elevation,
-            "visibility": "visible",
-        ]
-        let line: [String: Any] = [
-            "line-color": MBPositionPresenter.rgbaString(strokeColor),
-            "line-opacity": 1 - strokeColor.cgColor.alpha,
-            "line-width": strokeWidth,
-            "line-emissive-strength": 1.0,
-            "line-elevation-reference": "ground",
-            "line-z-offset": elevation,
-            "visibility": "visible",
-        ]
-        for (layer, properties) in [(layerBlueDotAccuracyFill, fill), (layerBlueDotAccuracyLine, line)] {
-            for (property, value) in properties {
-                do {
-                    try map.setLayerProperty(for: layer, property: property, value: value)
-                } catch {
-                    MPLog.mapbox.error("Blue dot \(property) rejected: \(error)")
-                }
-            }
-        }
-    }
-
-    /// A closed ring approximating a circle on the ground.
-    nonisolated static func circleRing(center: CLLocationCoordinate2D, radiusMeters: Double, segments: Int = 48) -> [CLLocationCoordinate2D] {
-        let metersPerDegreeLat = 6_378_137.0 * .pi / 180
-        let metersPerDegreeLon = metersPerDegreeLat * cos(center.latitude * .pi / 180)
-        var ring = (0..<segments).map { k in
-            let angle = 2 * Double.pi * Double(k) / Double(segments)
-            return CLLocationCoordinate2D(
-                latitude: center.latitude + radiusMeters * cos(angle) / metersPerDegreeLat,
-                longitude: center.longitude + radiusMeters * sin(angle) / metersPerDegreeLon)
-        }
-        ring.append(ring[0])
-        return ring
-    }
-
-    /// `rgba(...)` string, the alpha kept as `StyleColor` keeps it for the circle layer.
-    private nonisolated static func rgbaString(_ color: UIColor) -> String {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        if let srgb = CGColorSpace(name: CGColorSpace.sRGB), let converted = color.cgColor.converted(to: srgb, intent: .defaultIntent, options: nil) {
-            UIColor(cgColor: converted).getRed(&r, green: &g, blue: &b, alpha: &a)
-        }
-        return "rgba(\(Int((r * 255).rounded())), \(Int((g * 255).rounded())), \(Int((b * 255).rounded())), \(a))"
     }
 
     nonisolated func clear() {
@@ -229,10 +134,6 @@ final class MBPositionPresenter: MPPositionPresenter {
                     try map.updateLayer(withId: layerBlueDotMarker, type: SymbolLayer.self) { markerLayer in
                         markerLayer.visibility = .constant(.none)
                     }
-                }
-
-                for layer in [layerBlueDotAccuracyFill, layerBlueDotAccuracyLine] where map.layerExists(withId: layer) {
-                    try map.setLayerProperty(for: layer, property: "visibility", value: "none")
                 }
             } catch {}
         }
@@ -284,27 +185,6 @@ final class MBPositionPresenter: MPPositionPresenter {
                 }
             }
 
-            if map.sourceExists(withId: srcBlueDotAccuracy) == false {
-                var source = GeoJSONSource(id: srcBlueDotAccuracy)
-                source.data = .featureCollection(FeatureCollection(features: []))
-                try map.addSource(source)
-            }
-
-            // Between the circle and the marker, so a raised dot keeps the same stacking.
-            if map.layerExists(withId: layerBlueDotAccuracyFill) == false {
-                var fillLayer = FillLayer(id: layerBlueDotAccuracyFill, source: srcBlueDotAccuracy)
-                fillLayer.slot = Self.blueDotSlot
-                fillLayer.visibility = .constant(.none)
-                try map.addLayer(fillLayer, layerPosition: .above(layerBlueDotCircle))
-            }
-
-            if map.layerExists(withId: layerBlueDotAccuracyLine) == false {
-                var lineLayer = LineLayer(id: layerBlueDotAccuracyLine, source: srcBlueDotAccuracy)
-                lineLayer.slot = Self.blueDotSlot
-                lineLayer.visibility = .constant(.none)
-                try map.addLayer(lineLayer, layerPosition: .above(layerBlueDotAccuracyFill))
-            }
-
             if map.sourceExists(withId: srcBlueDotMarker) == false {
                 var source = GeoJSONSource(id: srcBlueDotMarker)
                 source.data = .featureCollection(FeatureCollection(features: []))
@@ -314,7 +194,7 @@ final class MBPositionPresenter: MPPositionPresenter {
             if map.layerExists(withId: layerBlueDotMarker) == false {
                 var markerLayer = SymbolLayer(id: layerBlueDotMarker, source: srcBlueDotMarker)
                 markerLayer.slot = Self.blueDotSlot
-                try map.addLayer(markerLayer, layerPosition: .above(layerBlueDotAccuracyLine))
+                try map.addLayer(markerLayer, layerPosition: .above(layerBlueDotCircle))
             }
         } catch {
             MPLog.mapbox.error("Error attempting to create blue dot sources and layers: " + error.localizedDescription)

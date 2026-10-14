@@ -27,7 +27,6 @@ extension Constants {
         LayerIDs.baseLineLayer: "middle",
         LayerIDs.animatedLineLayer: "middle",
         LayerIDs.stampLayer: "middle",
-        LayerIDs.elevatedStampLayer: "middle",
         LayerIDs.model3DLayer: "middle",
         LayerIDs.wallExtrusionLayer: "middle",
         LayerIDs.featureExtrusionLayer: "middle",
@@ -88,9 +87,6 @@ extension MapboxMap {
         // Repeating stamp (arrow / custom icon) along the route line, placed on the same line source.
         let routeStampLayer = SymbolLayer(id: Constants.LayerIDs.stampLayer, source: Constants.SourceIDs.lineSource)
 
-        // Stamps on an elevated route: one point each, so each can carry its own height.
-        let routeElevatedStampLayer = SymbolLayer(id: Constants.LayerIDs.elevatedStampLayer, source: Constants.SourceIDs.elevatedStampSource)
-
         let routeMarkerLayer = SymbolLayer(id: Constants.LayerIDs.routeMarkerLayer, source: Constants.SourceIDs.routeMarkerSource)
 
         var clipLayer = ClipLayer(id: Constants.LayerIDs.clippingLayer, source: Constants.SourceIDs.clippingSource)
@@ -111,7 +107,6 @@ extension MapboxMap {
                 routeBaseLayer,
                 routeAnimatedLayer,
                 routeStampLayer,
-                routeElevatedStampLayer,
                 model3DLayer,
                 wallExtrusionLayer,
                 featureExtrusionLayer,

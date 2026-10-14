@@ -308,6 +308,12 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// render. Public for the same reason as `collisionHandling` above — the protocol requires it.
     public var expandedTapAreaEnabled: Bool = true
 
+    /// The solution's icon-scale zoom band, or `nil` when the solution has not configured one.
+    ///
+    /// `nil` — the default, and the state of every solution that has not opted in — means the
+    /// renderer installs no `icon-size` expression at all on the marker layers.
+    public var iconScaleZoomBand: MPIconScaleZoomBand?
+
     /// Convention group (see the SAFETY block): written by `MPMapControlInternal` when it is created, read by
     /// `MBCameraOperator` and the directions renderer, all on the main actor (SPEX-2060).
     public var cameraAnimationsEnabled: Bool = true
@@ -357,6 +363,7 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             // Ignore `forceClear` - not applicable to mapbox rendering
             self.renderer?.customInfoWindow = self.customInfoWindow
             self.renderer?.collisionHandling = self.collisionHandling
+            self.renderer?.iconScaleZoomBand = self.iconScaleZoomBand
             self.renderer?.featureExtrusionOpacity = self.featureExtrusionOpacity
             self.renderer?.wallExtrusionOpacity = self.wallExtrusionOpacity
 

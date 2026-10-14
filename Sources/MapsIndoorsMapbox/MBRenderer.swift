@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 @preconcurrency import MapboxMaps
+import MapsIndoors
 @_spi(Private) import MapsIndoorsCore
 import UIKit
 
@@ -77,9 +78,6 @@ class MBRenderer {
             try configureGraphicLabelsLayer()
             try configureMarkerLayer(layerId: Constants.LayerIDs.markerLayer)
             try configureMarkerLayer(layerId: Constants.LayerIDs.markerNoCollisionLayer)
-            for layerId in [Constants.LayerIDs.markerLayer, Constants.LayerIDs.markerNoCollisionLayer, Constants.LayerIDs.flatLabelsLayer, Constants.LayerIDs.graphicLabelsLayer] {
-                configureSymbolElevation(layerId: layerId)
-            }
             try configurePolygonLayers()
             try configureFloorPlanLayer()
             try configure2DModelLayer()
@@ -158,6 +156,7 @@ class MBRenderer {
     // MARK: Layers: adding and setting properties
 
     private func configureMarkerLayer(layerId: String) throws {
+        let iconSize = MBRenderer.markerIconSizeValue(band: iconScaleZoomBand)
         try map?.updateLayer(withId: layerId, type: SymbolLayer.self) { layerUpdate in
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -174,6 +173,11 @@ class MBRenderer {
                     ""
                 })
             layerUpdate.iconAnchor = .expression(Exp(.get) { Key.markerIconPlacement.rawValue })
+            // Assigned unconditionally, but `nil` when no band is configured. `updateLayer` turns a
+            // nil back into the layer property's Mapbox default, so the inactive state is the
+            // untouched `icon-size` this layer had before the feature existed — not a neutral
+            // expression the engine would evaluate every frame for every marker.
+            layerUpdate.iconSize = iconSize
 
             // Only set the text if it's a floating label
             layerUpdate.textField = .expression(
@@ -188,7 +192,7 @@ class MBRenderer {
 
             layerUpdate.textAnchor = .expression(Exp(.get) { Key.labelAnchor.rawValue })
             layerUpdate.textJustify = .constant(TextJustify.left)
-            layerUpdate.textOffset = .expression(Exp(.get) { Key.labelOffset.rawValue })
+            layerUpdate.textOffset = MBRenderer.markerTextOffsetValue(band: iconScaleZoomBand)
             layerUpdate.symbolSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.markerGeometryArea.rawValue } })
             layerUpdate.textMaxWidth = .expression(Exp(.get) { Key.labelMaxWidth.rawValue })
             layerUpdate.textFont = .constant(["Open Sans Bold", "Arial Unicode MS Regular", "Arial Unicode MS Bold"])
@@ -210,6 +214,168 @@ class MBRenderer {
             layerUpdate.textHaloColor = .expression(Exp(.get) { Key.labelHaloColor.rawValue })
             layerUpdate.textHaloWidth = .expression(Exp(.get) { Key.labelHaloWidth.rawValue })
             layerUpdate.textHaloBlur = .expression(Exp(.get) { Key.labelHaloBlur.rawValue })
+        }
+    }
+
+    /// Base `icon-size` for a marker. The icon bitmap is rasterised at its final size before it is
+    /// ever registered with the style, so at rest the layer draws it 1:1. Zoom-responsive scaling
+    /// multiplies *this*, leaving the bitmap alone.
+    nonisolated static let markerIconBaseSize: Double = 1.0
+
+    /// Used when a feature carries no scaling factor. Neutral: the interpolation collapses to an
+    /// identity and the icon renders at exactly the size it does without this feature.
+    nonisolated static let neutralIconZoomFactor: Double = 1.0
+
+    /// Converts a MapsIndoors zoom level to the zoom the Mapbox engine evaluates style expressions
+    /// against. The two axes are one apart — ``MBCameraPosition`` reports MapsIndoors zoom as the
+    /// engine's zoom plus one — so a band authored as 18→22 in the CMS has to become stops at 17→21
+    /// here. Getting this wrong is silent: the icons still scale, just at the wrong zoom levels.
+    nonisolated static func engineZoom(mapsIndoorsZoom: Double) -> Double {
+        mapsIndoorsZoom - 1
+    }
+
+    /// The marker layer's `icon-size`, or `nil` when the solution has not configured a band.
+    ///
+    /// `nil` is the structural off switch. A neutral *expression* would be arithmetically identical
+    /// but is not the same thing: it makes the engine evaluate a per-feature interpolation on every
+    /// marker on every frame for solutions that never asked for the feature, and it changes what the
+    /// layer holds for every existing customer. Assigning `nil` through `updateLayer` restores the
+    /// property's default, which is what clears it on an active → inactive transition.
+    nonisolated static func markerIconSizeValue(band: MPIconScaleZoomBand?) -> Value<Double>? {
+        guard let band else { return nil }
+
+        return .expression(markerIconSizeExpression(band: band))
+    }
+
+    /// Builds the marker layer's `icon-size`: flat at the base size up to the band's lower bound,
+    /// then growing exponentially to `base × markerIconScale` at the upper bound.
+    ///
+    /// The interpolation has to sit at the *top level* and the multiplication inside the stop
+    /// outputs. Mapbox rejects `["zoom"]` anywhere except as the direct input of a top-level `step`
+    /// or `interpolate`, so the intuitive shape — multiplying an existing expression by an
+    /// interpolation — is illegal and drops the whole layer.
+    ///
+    /// This deliberately does *not* reuse the curve from ``configure2DModelLayer``. That one is
+    /// ground-scale: it shrinks by 2^-n as the camera pulls out, which is right for a model pinned
+    /// to the floor and catastrophic for a marker, which would go sub-pixel at low zoom.
+    ///
+    /// Only called for a configured band; the absent case is `markerIconSizeValue`'s to handle.
+    nonisolated static func markerIconSizeExpression(band: MPIconScaleZoomBand) -> Exp {
+        let stops: [Double: Exp] = [
+            engineZoom(mapsIndoorsZoom: band.zoomFrom): Exp(.literal) { markerIconBaseSize },
+            engineZoom(mapsIndoorsZoom: band.zoomTo): Exp(.product) {
+                Exp(.literal) { markerIconBaseSize }
+                Exp(.number) {
+                    Exp(.get) { Key.markerIconScale.rawValue }
+                    neutralIconZoomFactor
+                }
+            },
+        ]
+
+        return Exp(.interpolate) {
+            Exp(.exponential) { 2 }
+            Exp(.zoom)
+            stops
+        }
+    }
+
+    /// The marker layers' `text-offset`, band-gated like ``markerIconSizeValue`` — except off is
+    /// not `nil`: labels always need their offset, so off means the layer's original plain
+    /// `labelOffset` read.
+    nonisolated static func markerTextOffsetValue(band: MPIconScaleZoomBand?) -> Value<[Double]> {
+        guard let band else { return .expression(Exp(.get) { Key.labelOffset.rawValue }) }
+
+        return .expression(markerTextOffsetExpression(band: band))
+    }
+
+    /// `text-offset` for an active band: the resting offset gliding to the fully-grown-icon offset
+    /// on the same exponential-2 curve as ``markerIconSizeExpression``, with the stops deliberately
+    /// `min(1, band width)` engine zooms EARLIER. `icon-size` is re-evaluated per frame, but `text-offset` is a
+    /// layout property the engine freezes at each integer-zoom re-layout — leading the curve makes
+    /// every frozen value cover the icon through the *next* re-layout, trading mid-interval overlap
+    /// for a bounded, transient outward gap. Stops clamp at engine zoom 0 (a negative stop traps
+    /// Mapbox's stops builder); if clamping collapses the ordering the stops fall back unshifted.
+    /// GL expressions cannot multiply an array by a scalar, so the scaled endpoint arrives as its
+    /// own per-feature property (`labelOffsetScaled`).
+    nonisolated static func markerTextOffsetExpression(band: MPIconScaleZoomBand) -> Exp {
+        let iconFrom = engineZoom(mapsIndoorsZoom: band.zoomFrom)
+        let iconTo = engineZoom(mapsIndoorsZoom: band.zoomTo)
+        let lead = min(1.0, iconTo - iconFrom)
+        var from = max(0, iconFrom - lead)
+        var to = max(0, iconTo - lead)
+        if to <= from {
+            (from, to) = (iconFrom, iconTo)
+        }
+        return Exp(.interpolate) {
+            Exp(.exponential) { 2 }
+            Exp(.zoom)
+            [
+                from: labelOffsetStop(Key.labelOffset),
+                to: labelOffsetStop(Key.labelOffsetScaled, fallback: Key.labelOffset),
+            ]
+        }
+    }
+
+    /// One interpolation stop reading a per-feature offset pair. The `array<number, 2>` assertion
+    /// is load-bearing — a bare `get` types as `value`, which the engine refuses to interpolate.
+    /// No `[0,0]` literal fallback: MapboxMaps' DictionaryEncoder corrupts a nested literal array to
+    /// `[]` on the native set path, so the grown stop falls back to the resting offset instead.
+    private nonisolated static func labelOffsetStop(_ key: Key, fallback: Key? = nil) -> Exp {
+        Exp(.array) {
+            "number"
+            2
+            if let fallback {
+                Exp(.coalesce) {
+                    Exp(.get) { key.rawValue }
+                    Exp(.get) { fallback.rawValue }
+                }
+            } else {
+                Exp(.get) { key.rawValue }
+            }
+        }
+    }
+
+    /// The band the marker layers' `icon-size` expression was last built from, or `nil` — the
+    /// default — when the solution has not configured icon scaling and the marker layers carry no
+    /// `icon-size` at all.
+    ///
+    /// The band becomes *literal* stop inputs inside the expression, so it cannot be re-bound the
+    /// way a per-feature property can. A band arriving on a later sync has to re-set the layout
+    /// property on every icon layer, which is what this observer does — in both directions.
+    var iconScaleZoomBand: MPIconScaleZoomBand? {
+        didSet {
+            if oldValue != iconScaleZoomBand {
+                applyMarkerIconScaling()
+            }
+        }
+    }
+
+    /// Re-applies — or removes — the `icon-size` and `text-offset` expressions on both marker
+    /// layers after a band change, each property in its own update so one failing can't drop the other.
+    ///
+    /// Handles the active → inactive direction as well as the reverse: `markerIconSizeValue` returns
+    /// `nil` for an absent band, and `updateLayer` resets a property assigned `nil` to its Mapbox
+    /// default. Without that, turning scaling off in the CMS would leave the last expression baked
+    /// into the layer until the map was rebuilt.
+    ///
+    /// Runs synchronously. `MBRenderer` is `@MainActor`-isolated and every writer of the band is
+    /// already on the main actor, so deferring into a `Task` would only open a window in which the
+    /// layers disagree with the band.
+    private func applyMarkerIconScaling() {
+        let iconSize = MBRenderer.markerIconSizeValue(band: iconScaleZoomBand)
+        let textOffset = MBRenderer.markerTextOffsetValue(band: iconScaleZoomBand)
+        for layerId in [Constants.LayerIDs.markerLayer, Constants.LayerIDs.markerNoCollisionLayer] {
+            // Separate updates: `updateLayer` commits atomically, so a rejected text-offset must not drop icon-size too.
+            do {
+                try map?.updateLayer(withId: layerId, type: SymbolLayer.self) { $0.iconSize = iconSize }
+            } catch {
+                MPLog.mapbox.error("Error updating icon-size on \(layerId): \(error.localizedDescription)")
+            }
+            do {
+                try map?.updateLayer(withId: layerId, type: SymbolLayer.self) { $0.textOffset = textOffset }
+            } catch {
+                MPLog.mapbox.error("Error updating text-offset on \(layerId): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -323,41 +489,22 @@ class MBRenderer {
         }
     }
 
-    /// Polygons and 2D-model footprints, except raised ones: a fill can't be lifted per feature, so
-    /// those are drawn as slabs in the feature extrusion layer instead.
-    nonisolated static let groundedPolygonFilter = Exp(.all) {
-        Exp(.any) {
-            Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
-            }
-            Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
-            }
-        }
-        Exp(.lte) {
-            Exp(.coalesce) {
-                Exp(.get) { Key.zOffset.rawValue }
-                0
-            }
-            0
-        }
-    }
-
-    /// Lifts symbols of raised locations. Set through the string API, as the typed accessor is
-    /// `@_spi(Experimental)`.
-    private func configureSymbolElevation(layerId: String) {
-        try? map?.setLayerProperty(for: layerId, property: "symbol-z-offset", value: ["coalesce", ["get", Key.zOffset.rawValue], 0])
-    }
-
     private func configurePolygonLayers() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.polygonFillLayer, type: FillLayer.self) { layerUpdate in
             layerUpdate.fillColor = .expression(Exp(.get) { Key.polygonFillcolor.rawValue })
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.polygonFillOpacity.rawValue })
             layerUpdate.fillSortKey = .expression(Exp(.subtract) { Exp(.get) { Key.polygonArea.rawValue } })
 
-            layerUpdate.filter = Self.groundedPolygonFilter
+            layerUpdate.filter = Exp(.any) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
+            }
         }
 
         try map?.updateLayer(withId: Constants.LayerIDs.polygonLineLayer, type: LineLayer.self) { layerUpdate in
@@ -366,7 +513,16 @@ class MBRenderer {
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.polygonStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
 
-            layerUpdate.filter = Self.groundedPolygonFilter
+            layerUpdate.filter = Exp(.any) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.polygon.rawValue }
+                }
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model2d.rawValue }
+                }
+            }
         }
     }
 
@@ -520,12 +676,6 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.wallExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.wallExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.wallExtrusionHeight.rawValue })
-            // Only raised locations set a base; other walls start at the floor.
-            layerUpdate.fillExtrusionBase = .expression(
-                Exp(.coalesce) {
-                    Exp(.get) { Key.wallExtrusionBase.rawValue }
-                    0
-                })
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -538,12 +688,6 @@ class MBRenderer {
         try map?.updateLayer(withId: Constants.LayerIDs.featureExtrusionLayer, type: FillExtrusionLayer.self) { layerUpdate in
             layerUpdate.fillExtrusionColor = .expression(Exp(.get) { Key.featureExtrusionColor.rawValue })
             layerUpdate.fillExtrusionHeight = .expression(Exp(.get) { Key.featureExtrusionHeight.rawValue })
-            // Only slope bands set a base; plain extrusions start at the floor.
-            layerUpdate.fillExtrusionBase = .expression(
-                Exp(.coalesce) {
-                    Exp(.get) { Key.featureExtrusionBase.rawValue }
-                    0
-                })
 
             layerUpdate.filter = Exp(.eq) {
                 Exp(.get) { Key.type.rawValue }
@@ -710,7 +854,7 @@ class MBRenderer {
         let model2DGeometryFeature: Feature?
         let model3DFeature: Feature?
         let wallExtrusionFeature: Feature?
-        let featureExtrusionFeatures: [Feature]
+        let featureExtrusionFeature: Feature?
     }
 
     /// Test instrumentation: the peak number of `render` bodies running
@@ -749,7 +893,7 @@ class MBRenderer {
                     model2DGeometryFeature: is2dModelsEnabled ? model.model2DGeometryFeature : nil,
                     model3DFeature: model.model3DFeature,
                     wallExtrusionFeature: isWallExtrusionsEnabled ? model.wallExtrusionFeature : nil,
-                    featureExtrusionFeatures: isFeatureExtrusionsEnabled ? model.featureExtrusionFeatures : []
+                    featureExtrusionFeature: isFeatureExtrusionsEnabled ? model.featureExtrusionFeature : nil
                 ))
         }
 
@@ -836,7 +980,9 @@ class MBRenderer {
 
                     try Task.checkCancellation()
 
-                    featuresExtrusions.append(contentsOf: input.featureExtrusionFeatures)
+                    if let featureExtrusionLayer = input.featureExtrusionFeature {
+                        featuresExtrusions.append(featureExtrusionLayer)
+                    }
 
                     try Task.checkCancellation()
 
@@ -1075,6 +1221,8 @@ class MBRenderer {
 
 /// We are extending the view model protocol with implementations for producing Mapbox 'Feature' objects.
 extension MPViewModel {
+    // Internal rather than fileprivate so the Mapbox test target can assert what actually lands on
+    // the feature, matching `model2DFeature` below.
     var markerFeature: Feature? {
         guard let marker else { return nil }
 
@@ -1091,7 +1239,11 @@ extension MPViewModel {
         if let labelOffset = marker.properties[.labelOffset] as? [Double] {
             feature.properties?[Key.labelOffset.rawValue] = JSONValue(JSONArray(labelOffset.map { JSONValue($0) }))
         }
+        if let labelOffsetScaled = marker.properties[.labelOffsetScaled] as? [Double] {
+            feature.properties?[Key.labelOffsetScaled.rawValue] = JSONValue(JSONArray(labelOffsetScaled.map { JSONValue($0) }))
+        }
         if let markerGeometryArea = marker.properties[.markerGeometryArea] as? Double { feature.properties?[Key.markerGeometryArea.rawValue] = JSONValue(markerGeometryArea) }
+        if let markerIconScale = marker.properties[.markerIconScale] as? Double { feature.properties?[Key.markerIconScale.rawValue] = JSONValue(markerIconScale) }
         if let labelMaxWidth = marker.properties[.labelMaxWidth] as? UInt { feature.properties?[Key.labelMaxWidth.rawValue] = JSONValue(Int(labelMaxWidth)) }
         if let labelSize = marker.properties[.labelSize] as? Int { feature.properties?[Key.labelSize.rawValue] = JSONValue(labelSize) }
         if let labelColor = marker.properties[.labelColor] as? String { feature.properties?[Key.labelColor.rawValue] = JSONValue(labelColor) }
@@ -1112,7 +1264,6 @@ extension MPViewModel {
         }
         if let markerType = (marker.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(markerType) }
         if let clickable = marker.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
-        if let zOffset = marker.properties[.zOffset] as? Double { feature.properties?[Key.zOffset.rawValue] = JSONValue(zOffset) }
 
         return feature
     }
@@ -1135,7 +1286,6 @@ extension MPViewModel {
         if let polygonArea = polygon.properties[.polygonArea] as? Double { feature.properties?[Key.polygonArea.rawValue] = JSONValue(polygonArea) }
         if let polygonType = (polygon.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(polygonType) }
         if let clickable = polygon.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
-        if let zOffset = polygon.properties[.zOffset] as? Double { feature.properties?[Key.zOffset.rawValue] = JSONValue(zOffset) }
 
         return feature
     }
@@ -1249,34 +1399,10 @@ extension MPViewModel {
         feature.properties = JSONObject()
         if let wallExtrusionColor = wallExtrusion.properties[.wallExtrusionColor] as? String { feature.properties?[Key.wallExtrusionColor.rawValue] = JSONValue(wallExtrusionColor) }
         if let wallExtrusionHeight = wallExtrusion.properties[.wallExtrusionHeight] as? Double { feature.properties?[Key.wallExtrusionHeight.rawValue] = JSONValue(wallExtrusionHeight) }
-        if let wallExtrusionBase = wallExtrusion.properties[.wallExtrusionBase] as? Double { feature.properties?[Key.wallExtrusionBase.rawValue] = JSONValue(wallExtrusionBase) }
         if let wallExtrusionType = (wallExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(wallExtrusionType) }
         if let clickable = wallExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
         return feature
-    }
-
-    /// One feature per slope band when the extrusion carries bands, else the plain extrusion.
-    var featureExtrusionFeatures: [Feature] {
-        guard let featureExtrusion else { return [] }
-        guard let bands = featureExtrusion.properties[.featureExtrusionBands] as? [MPSlopeBand] else {
-            return featureExtrusionFeature.map { [$0] } ?? []
-        }
-
-        let color = featureExtrusion.properties[.featureExtrusionColor] as? String
-        let clickable = featureExtrusion.properties[.clickable] as? Bool
-        return bands.map { band in
-            let rings = band.rings.map { ring in ring.map { CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0]) } }
-            var feature = Feature(geometry: Polygon(rings))
-            feature.identifier = .string(id)
-            feature.properties = JSONObject()
-            if let color { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(color) }
-            feature.properties?[Key.featureExtrusionBase.rawValue] = JSONValue(band.base)
-            feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(band.height)
-            feature.properties?[Key.type.rawValue] = JSONValue(MPRenderedFeatureType.featureExtrusion.rawValue)
-            if let clickable { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
-            return feature
-        }
     }
 
     fileprivate var featureExtrusionFeature: Feature? {
@@ -1288,7 +1414,6 @@ extension MPViewModel {
         feature.properties = JSONObject()
         if let featureExtrusionColor = featureExtrusion.properties[.featureExtrusionColor] as? String { feature.properties?[Key.featureExtrusionColor.rawValue] = JSONValue(featureExtrusionColor) }
         if let featureExtrusionHeight = featureExtrusion.properties[.featureExtrusionHeight] as? Double { feature.properties?[Key.featureExtrusionHeight.rawValue] = JSONValue(featureExtrusionHeight) }
-        if let featureExtrusionBase = featureExtrusion.properties[.featureExtrusionBase] as? Double { feature.properties?[Key.featureExtrusionBase.rawValue] = JSONValue(featureExtrusionBase) }
         if let featureExtrusionType = (featureExtrusion.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(featureExtrusionType) }
         if let clickable = featureExtrusion.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
 
