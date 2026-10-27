@@ -7,9 +7,15 @@ import MapboxMaps
 /// a real Mapbox style.
 protocol MBStyleImportConfigSetting: AnyObject {
     func setStyleImportConfigProperty(for importId: String, config: String, value: Any) throws
+    /// The current value of an import config: a colour string, an expression array, a number, ….
+    func styleImportConfigValue(for importId: String, config: String) throws -> Any
 }
 
-extension MapboxMap: MBStyleImportConfigSetting {}
+extension MapboxMap: MBStyleImportConfigSetting {
+    func styleImportConfigValue(for importId: String, config: String) throws -> Any {
+        try getStyleImportConfigProperty(for: importId, config: config).value
+    }
+}
 
 @MainActor
 class MapboxWorldTransitionHandler {
@@ -18,31 +24,40 @@ class MapboxWorldTransitionHandler {
     private let transitLabels = "showTransitLabels"
     private let roadLabels = "showRoadLabels"
     private let poiLabels = "showPointOfInterestLabels"
-    // Mapbox Standard's fill-extrusion building opacity (0.0–1.0). A float, so it fades
-    // buildings gradually across the transition band — the "full" online experience.
-    private let buildingOpacity = "buildingsOpacity"
-    // Mapbox Standard's binary umbrella toggle for all 3D objects (buildings + landmark models
-    // + trees). Used as the offline fallback (see `useShow3dObjectsNow`).
-    private let show3dObjects = "show3dObjects"
+    /// Mapbox Standard's building colour config ("Set a custom color for 3D & 2D buildings"). The sole
+    /// mechanism for fading base-map buildings across the transition band (SPEX-2517): Standard derives
+    /// building opacity from its alpha, online and offline alike. It replaces `buildingsOpacity`, which
+    /// existed only in an experimental basemap and had no effect offline, and the `show3dObjects`
+    /// fallback, which also hid landmark models and trees.
+    private let colorBuildings = "colorBuildings"
 
-    // Internal now that the selector is typed: nothing outside this module needs to name it, so it
-    // is an implementation detail of how a change reaches the handler rather than part of the
-    // contract. `MapBoxProvider.buildingHideMode` is what a caller sets.
-    nonisolated static let buildingHideModeChanged = Notification.Name("com.mapspeople.mapsindoors.debug.buildingHideModeChanged")
-
-    /// Whether to hide buildings via the binary `show3dObjects` right now — honours the override,
-    /// and in `auto` falls back to `show3dObjects` only when offline.
-    private var useShow3dObjectsNow: Bool {
-        switch MapBoxProvider.buildingHideMode {
-        case .buildingsOpacity: return false
-        case .show3dObjects: return true
-        case .auto: return !NetworkPathMonitor.shared.isConnected
-        }
+    /// The style's own `colorBuildings`, read before the first write after each style load. The fade
+    /// writes this colour back with only its alpha scaled, so a building colour set by a host style
+    /// survives. `raw` is the value as read, written back verbatim at full opacity when it could not
+    /// be parsed, so an unparseable host colour is still restored.
+    private struct BuildingColorBaseline {
+        let color: MBBuildingColor
+        let raw: Any
+        let parsed: Bool
     }
 
-    // `nonisolated(unsafe)`: appended in the non-isolated initialiser, drained in `deinit`; both are single-owner
-    // moments with no concurrent access.
-    nonisolated(unsafe) private var reapplyObservers: [NSObjectProtocol] = []
+    /// Cleared by ``resetBuildingColorBaseline()`` when a new style's JSON loads — the point at which
+    /// Mapbox resets import config.
+    private var buildingColorBaseline: BuildingColorBaseline?
+
+    /// The last colour written, and the baseline alpha it was scaled from. A write that lands after
+    /// the reset but before the baseline is read would otherwise be adopted as the style's own colour,
+    /// and an adopted alpha of 0 would keep the buildings hidden until the next style load.
+    private var lastBuildingWrite: (color: MBBuildingColor, baselineAlpha: Double)?
+
+    /// The opacity last written, so repeated applies at the same opacity (the camera-driven
+    /// `enableMapboxBuildings == false` path) do not rewrite the config. Cleared whenever the written
+    /// value can no longer be trusted.
+    private var lastAppliedBuildingOpacity: Double?
+
+    /// A style that rejects `colorBuildings`, or reports a colour that cannot be parsed, fails every
+    /// apply; log that once, not per camera change.
+    private var didLogBuildingFadeFailure = false
 
     weak var map: MapBoxProvider?
     var enableMapboxBuildings = true {
@@ -50,6 +65,7 @@ class MapboxWorldTransitionHandler {
             // Reset cached state so the next call applies the change
             lastAppliedWorldState = nil
             lastAppliedMarkerConfig = nil
+            lastAppliedBuildingOpacity = nil
             Task { [weak self] in
                 await self?.configureMapsIndoorsVsMapboxVisibility()
             }
@@ -58,47 +74,100 @@ class MapboxWorldTransitionHandler {
 
     nonisolated required init(mapProvider: MapBoxProvider) {
         map = mapProvider
-        // Re-apply immediately when connectivity changes (auto mode flips buildingsOpacity <->
-        // show3dObjects) or when the building-hide override changes — so the switch is visible
-        // without having to cross the transition band again.
-        for name in [NetworkPathMonitor.networkStatusChanged, Self.buildingHideModeChanged] {
-            let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in await self?.reapplyVisibility() }
+    }
+
+    /// Forget the captured building colour. Call synchronously when a new style's JSON has loaded
+    /// (`onStyleDataLoaded`, `.style`), which is when Mapbox resets import config: earlier and the
+    /// old style's colour is captured, later and a write in between can be read back as the style's.
+    func resetBuildingColorBaseline() {
+        buildingColorBaseline = nil
+        lastAppliedBuildingOpacity = nil
+    }
+
+    /// The building colour to fade: the style's own, captured on first use after a style load.
+    private func baselineBuildingColor(on map: MBStyleImportConfigSetting) throws -> BuildingColorBaseline {
+        if let buildingColorBaseline { return buildingColorBaseline }
+        let value = try map.styleImportConfigValue(for: baseMap, config: colorBuildings)
+        let baseline: BuildingColorBaseline
+        if let parsed = MBBuildingColor(styleValue: value) {
+            if let last = lastBuildingWrite, parsed.isApproximatelyEqual(to: last.color) {
+                // Our own write, read back: restore the alpha it was scaled from.
+                baseline = BuildingColorBaseline(color: parsed.withAlpha(last.baselineAlpha), raw: value, parsed: true)
+            } else {
+                baseline = BuildingColorBaseline(color: parsed, raw: value, parsed: true)
             }
-            reapplyObservers.append(token)
-        }
-    }
-
-    deinit {
-        reapplyObservers.forEach { NotificationCenter.default.removeObserver($0) }
-    }
-
-    /// Apply the base-map building visibility for the given target opacity.
-    ///
-    /// Writes BOTH import-config keys on every apply — the active mechanism plus the other key reset
-    /// to its neutral (non-suppressing) value. The two keys are independent, and only a style reload
-    /// resets import config to defaults, so writing just one would let the other stay latched: an
-    /// offline `show3dObjects = false` would keep all base-map 3D content hidden after reconnecting
-    /// (when we switch to `buildingsOpacity`) until the next style reload. Re-applying both — driven
-    /// by the `reapplyVisibility()` on a connectivity/mode change — guarantees a mechanism switch
-    /// takes effect immediately.
-    ///
-    /// - `useShow3dObjectsNow` (offline, or forced): drive the binary umbrella `show3dObjects`
-    ///   (opacity ≥ 1.0 → shown, otherwise hidden) and neutralise the graded key to fully-opaque.
-    /// - otherwise (online): drive the graded `buildingsOpacity` fade and neutralise the umbrella to
-    ///   shown (`true`), so a prior offline hard-hide can't linger.
-    private func applyBuildingConfig(opacity: Double, on map: MBStyleImportConfigSetting) throws {
-        if useShow3dObjectsNow {
-            try map.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: 1.0)
-            try map.setStyleImportConfigProperty(for: baseMap, config: show3dObjects, value: opacity >= 1.0)
         } else {
-            try map.setStyleImportConfigProperty(for: baseMap, config: show3dObjects, value: true)
-            try map.setStyleImportConfigProperty(for: baseMap, config: buildingOpacity, value: opacity)
+            logBuildingFadeFailureOnce("cannot parse '\(colorBuildings)' value \(value); fading Standard's default colour")
+            baseline = BuildingColorBaseline(color: .standardDefault, raw: value, parsed: false)
         }
+        buildingColorBaseline = baseline
+        return baseline
+    }
+
+    /// Apply the base-map building visibility for the given target opacity: write the style's own
+    /// building colour back with its alpha scaled by `opacity`. 1.0 restores the style's colour exactly;
+    /// 0.0 makes the buildings fully transparent. Hue, saturation and lightness are never changed.
+    ///
+    /// Not gated on the `basemap` import's reported config keys: when Standard is the root style they
+    /// do not describe this key, so gating on them silently kills the fade. A failed read or write is
+    /// rethrown so the world state is not cached as applied and the next apply retries (SPEX-2097).
+    /// Callers write it after the label configs, so a failure cannot block those.
+    private func applyBuildingConfig(opacity: Double, on map: MBStyleImportConfigSetting) throws {
+        guard opacity != lastAppliedBuildingOpacity else { return }
+        do {
+            let baseline = try baselineBuildingColor(on: map)
+            let color = baseline.color.withAlpha(baseline.color.alpha * opacity)
+            // An unparseable colour is only replaced while fading; at full opacity it goes back as read.
+            let value: Any = !baseline.parsed && opacity >= 1 ? baseline.raw : color.styleString(alpha: color.alpha)
+            try map.setStyleImportConfigProperty(for: baseMap, config: colorBuildings, value: value)
+            lastBuildingWrite = (color, baseline.color.alpha)
+            lastAppliedBuildingOpacity = opacity
+        } catch {
+            logBuildingFadeFailureOnce("'\(colorBuildings)' rejected by the '\(baseMap)' import: \(error)")
+            throw error
+        }
+    }
+
+    private func logBuildingFadeFailureOnce(_ message: String) {
+        guard !didLogBuildingFadeFailure else { return }
+        didLogBuildingFadeFailure = true
+        MPLog.mapbox.error("Base-map building fade: \(message)")
     }
 
     /// Tracks the last applied world state to avoid redundant style config calls
     private enum WorldState: Equatable { case mapsindoors, mapbox, intermediary }
+
+    /// The base-map building opacity each world state stands for — the single visible consequence of the
+    /// state, and so what it is checked by.
+    private func buildingOpacity(for state: WorldState) -> Double {
+        switch state {
+        case .mapsindoors: 0.0
+        // Matches `.mapbox` below: with the base map's buildings switched off there is nothing to
+        // half-fade, and the pass ends by writing 0.0 regardless. Expecting 0.5 here meant the cache
+        // check never matched in the transition band, so the import config was rewritten on every
+        // debounced camera change.
+        case .intermediary: enableMapboxBuildings ? 0.5 : 0.0
+        case .mapbox: enableMapboxBuildings ? 1.0 : 0.0
+        }
+    }
+
+    /// Whether the map still holds the building fade this state stands for.
+    ///
+    /// `false` when that cannot be confirmed: the value cannot be read, which covers the window where the
+    /// `basemap` import does not exist yet, or no baseline has been read since the last style load.
+    /// Writing again then is harmless, and not writing is the bug. Only the alpha is compared, since the
+    /// fade changes nothing else and a map that dropped the write holds the style's own colour.
+    private func buildingConfigIsApplied(_ state: WorldState) -> Bool {
+        guard let activeMapboxMap, let baseline = buildingColorBaseline,
+            let value = try? activeMapboxMap.styleImportConfigValue(for: baseMap, config: colorBuildings)
+        else { return false }
+        let opacity = buildingOpacity(for: state)
+        guard let held = MBBuildingColor(styleValue: value) else {
+            // An unparseable style colour is written back as read at full opacity, and only there.
+            return !baseline.parsed && opacity >= 1
+        }
+        return abs(held.alpha - baseline.color.alpha * opacity) < 0.01
+    }
     private var lastAppliedWorldState: WorldState?
     /// Tracks the last applied marker/road label config to avoid redundant calls
     private var lastAppliedMarkerConfig: (showMarkers: Bool?, showRoads: Bool?)?
@@ -124,6 +193,7 @@ class MapboxWorldTransitionHandler {
     func reapplyVisibility() async {
         lastAppliedWorldState = nil
         lastAppliedMarkerConfig = nil
+        lastAppliedBuildingOpacity = nil
         await configureMapsIndoorsVsMapboxVisibility()
     }
 
@@ -170,8 +240,17 @@ class MapboxWorldTransitionHandler {
                 newWorldState = .intermediary
             }
 
-            // Skip redundant style updates when world state hasn't changed
-            if newWorldState != lastAppliedWorldState {
+            // The cache records what was written, not what the map kept. A style import that becomes
+            // available *after* a successful write comes up with its own default config and silently
+            // discards ours — the map is then left with solid buildings covering the MapsIndoors POIs,
+            // and every later pass computes the same state and skips the one write that would fix it.
+            // Measured on a reproducing cold start: opacity 0.5 applied at 0.48 s, then a pass at 4.89 s
+            // skipped as "unchanged" against a map that had reverted to solid.
+            let cacheMatchesMap = lastAppliedWorldState.map(buildingConfigIsApplied) ?? false
+            if newWorldState != lastAppliedWorldState || cacheMatchesMap == false {
+                // The building write keeps its own cache of the last opacity, which would skip the very
+                // write this pass is here to repeat.
+                if cacheMatchesMap == false { lastAppliedBuildingOpacity = nil }
                 switch newWorldState {
                 case .mapsindoors:
                     try applyShowMapsIndoorsWorld()
@@ -200,8 +279,6 @@ class MapboxWorldTransitionHandler {
     private func applyShowMapsIndoorsWorld() throws {
         guard let map, let activeMapboxMap else { return }
 
-        try applyBuildingConfig(opacity: 0.0, on: activeMapboxMap)
-
         if map.showMapboxMapMarkers == true {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: transitLabels, value: true)
@@ -217,21 +294,23 @@ class MapboxWorldTransitionHandler {
         } else {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
         }
+
+        try applyBuildingConfig(opacity: 0.0, on: activeMapboxMap)
     }
 
     private func applyShowIntermediaryWorld() throws {
         guard let activeMapboxMap else { return }
         // Half-fade the base-map buildings in the transition band so they blend out gradually
-        // on the way into the MapsIndoors world (rather than snapping off).
-        try applyBuildingConfig(opacity: 0.5, on: activeMapboxMap)
+        // on the way into the MapsIndoors world (rather than snapping off) — but only when there are
+        // buildings to fade. Through `buildingOpacity(for:)` rather than a literal, so what this writes
+        // and what the cache check expects cannot drift apart.
+        try applyBuildingConfig(opacity: buildingOpacity(for: .intermediary), on: activeMapboxMap)
     }
 
     /// Show all Mapbox content, if enabled
     private func applyShowMapboxWorld() throws {
         guard let map, let activeMapboxMap else { return }
 
-        try applyBuildingConfig(opacity: enableMapboxBuildings ? 1.0 : 0.0, on: activeMapboxMap)
-
         if map.showMapboxMapMarkers == true {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: placeLabels, value: true)
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: poiLabels, value: true)
@@ -247,5 +326,7 @@ class MapboxWorldTransitionHandler {
         } else {
             try activeMapboxMap.setStyleImportConfigProperty(for: baseMap, config: roadLabels, value: false)
         }
+
+        try applyBuildingConfig(opacity: enableMapboxBuildings ? 1.0 : 0.0, on: activeMapboxMap)
     }
 }

@@ -1,6 +1,7 @@
 import CoreLocation
 import Foundation
 import MapboxMaps
+import os
 @_spi(Private) import MapsIndoors
 
 /// Mapbox implementation of ``MapProviderBaseMapCache`` that uses ``TileStore`` to
@@ -28,6 +29,8 @@ import MapboxMaps
 ///      style packs entirely, so neither figure lets a host account for it. Bounded by how many
 ///      distinct styles a host actually uses, so left as a follow-up, but newly reachable since
 ///      SPEX-2553: before that only one style URI was ever requested. Raised in review on !2019.
+///      The one style the SDK itself retired (SPEX-2517) is removed on the next sync; see
+///      ``retiredMapsIndoorsStyleURI``.
 final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable {
 
     private let tileStore: TileStore
@@ -101,11 +104,12 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         let request = await resolvedRequestFromMainActor(
             for: styleSource, bounds: bounds, minZoom: minZoom, maxZoom: maxZoom)
 
-        // Persist the style pack for the style the map actually loads (the MapsIndoors
-        // wrapper style, or a consumer's custom style) so its style JSON / sprites /
+        // Persist the style pack for the style the map actually loads (Mapbox Standard,
+        // or a consumer's custom style) so its style JSON / sprites /
         // glyphs — and the resources of any style it imports — are available on a cold
         // offline launch. The base-map *tiles* are cached separately below, from the base
         // map's own style (see makeDescriptors).
+        await removeRetiredStylePackOnce()
         try await loadStylePack(for: mapStyleURI(for: request.styleSource))
 
         // Hold the Cancelable so a cancelled enclosing Task stops the in-flight
@@ -153,9 +157,9 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         //
         // That is not the same as the figure being free of style-pack bytes. `makeDescriptors`
         // attaches `stylePackOptions` to every descriptor whose style is not the map style, so
-        // Standard's pack is part of what this describes whenever the map is on anything else —
-        // which is the usual case. Only a map already on Standard produces descriptors carrying
-        // no style-pack options at all.
+        // Standard's pack is part of what this describes whenever the map is on a host style.
+        // On the SDK's own style — Standard, the usual case — the descriptors carry no style-pack
+        // options at all.
         //
         // What is not settled here is whether Mapbox counts those bytes into the estimate or into
         // the separate style-pack store that `cachedRegionSize(forRegionIds:)` deliberately
@@ -360,6 +364,28 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         }
     }
 
+    /// The style `Constants.Style.mapsIndoorsDefaultURI` named up to 4.22.0: a MapsPeople wrapper
+    /// importing an experimental basemap. Nothing requests it since SPEX-2517, so a pack cached under
+    /// it would otherwise sit on disk, and in `cachedRegionSize`, until every region is gone
+    /// (item 3 of the type doc).
+    static let retiredMapsIndoorsStyleURI = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
+
+    private let didRemoveRetiredStylePack = OSAllocatedUnfairLock(initialState: false)
+
+    /// Remove the retired style's pack, once per process. Idempotent, and a no-op when absent.
+    private func removeRetiredStylePackOnce() async {
+        let alreadyDone = didRemoveRetiredStylePack.withLock { done -> Bool in
+            defer { done = true }
+            return done
+        }
+        guard !alreadyDone, let retired = StyleURI(rawValue: Self.retiredMapsIndoorsStyleURI) else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.runOnOwningActor {
+                self.offlineManager.removeStylePack(for: retired) { _ in continuation.resume() }
+            }
+        }
+    }
+
     /// Remove every persisted style pack, but only when no tile regions remain (see
     /// `removeCachedRegion`). Style packs are shared per style URI, so this is the
     /// safe point to reclaim them without breaking a still-cached region.
@@ -389,8 +415,7 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         }
     }
 
-    /// The style the map actually loads for this source: the MapsIndoors wrapper style
-    /// (which imports the Mapbox Standard base map as the "basemap" import), or a
+    /// The style the map actually loads for this source: Mapbox Standard (the SDK's style), or a
     /// consumer-provided custom style.
     func mapStyleURI(for source: MPMapboxStyleSource) -> StyleURI {
         switch source {
@@ -427,16 +452,14 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
     /// The tileset descriptors whose tile packs must be cached for the base map to render
     /// offline.
     ///
-    /// The base map is always Mapbox **Standard**, cached from its own style URI.
-    /// `createTilesetDescriptor` built from the MapsIndoors wrapper style does NOT capture
-    /// the tilesets of the style it *imports* as "basemap", so caching the wrapper leaves
-    /// the base map blank offline — the imported Standard style has to be cached directly.
-    /// A custom style may additionally declare its own first-party sources, so it is cached
-    /// alongside Standard.
+    /// The base map is always Mapbox **Standard**, cached from its own style URI. For the SDK's
+    /// own style that is the only descriptor, since the SDK renders Standard directly (SPEX-2517).
+    /// A custom style gets its own descriptor alongside Standard: `createTilesetDescriptor`
+    /// does NOT capture the tilesets of a style it *imports* as "basemap", so a host style
+    /// importing Standard would otherwise go blank offline.
     ///
     /// Note that Standard is appended unconditionally, which is right for any style that
-    /// imports it (the MapsIndoors style does, and it was the only possibility before
-    /// SPEX-2553) but not a certainty any more: a host style that does *not* import Standard
+    /// imports it but not a certainty any more: a host style that does *not* import Standard
     /// still gets Standard's tilesets downloaded, which it will never draw. Wasted bytes
     /// rather than a wrong render, so it is recorded here rather than fixed.
     func makeDescriptors(
@@ -459,9 +482,9 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         let mapStyle = mapStyleURI(for: source).rawValue
 
         var styleURIs: [StyleURI] = [.standard]
-        // Skip a custom style that *is* Standard. Since SPEX-2553 the source can be resolved
-        // from the live map, and a host that never set a style of its own leaves the map on
-        // Standard — which would otherwise append a second, identical descriptor here.
+        // Skip an explicit `.custom(standard)`: Standard is already in the list, so it would
+        // otherwise append a second, identical descriptor. (A map configured with Standard is on
+        // the SDK's own style and resolves to `.mapsIndoorsDefault`, never reaching this.)
         if case .custom(let url) = source, let custom = StyleURI(url: url),
             custom.rawValue != StyleURI.standard.rawValue
         {

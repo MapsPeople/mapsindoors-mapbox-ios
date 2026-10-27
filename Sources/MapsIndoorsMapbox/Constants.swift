@@ -54,12 +54,16 @@ enum Constants {
     }
 
     enum Style {
-        /// The MapsIndoors-managed Mapbox style `MapBoxProvider` renders by default.
+        /// The Mapbox style `MapBoxProvider` renders by default: Mapbox Standard (SPEX-2517).
+        ///
+        /// It replaces a MapsPeople wrapper style that imported an experimental basemap only for its
+        /// `buildingsOpacity` config. The building fade now uses Standard's `colorBuildings`, which
+        /// also works offline (see `MapboxWorldTransitionHandler`).
         ///
         /// `MBBaseMapCacheProvider` compares the live style against this to decide whether
         /// the map is still on the MapsIndoors style or the host has replaced it; that
         /// comparison, not this constant alone, is what keeps the cached tiles from
         /// diverging from what is rendered (see `resolvedStyleSource(for:)`).
-        static let mapsIndoorsDefaultURI = "mapbox://styles/mapspeople/clrakuu6s003j01pf11uz5d45"
+        static let mapsIndoorsDefaultURI = "mapbox://styles/mapbox/standard"
     }
 }

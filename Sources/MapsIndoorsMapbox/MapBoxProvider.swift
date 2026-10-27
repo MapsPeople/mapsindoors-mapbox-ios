@@ -54,22 +54,6 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     public let model2DResolutionLimit = 500
     public let providerName = "mapbox"
 
-    // SAFETY: a process-wide debug/QA selector, not a per-map setting — a host sets it once and it
-    // applies to every provider, including ones created later, which is why it is static rather than
-    // an instance property. `nonisolated(unsafe)` for the same reason
-    // `MPRoutingProvider.routingServiceType` is: it is written from whatever thread the host happens
-    // to be on, and the value is a plain `Int` enum that cannot tear.
-    //
-    // Typed rather than a `UserDefaults` string key, so renaming or renumbering is a compile error
-    // for every caller instead of a silent revert to `auto`. The re-apply notification stays
-    // internal to this module — this setter posts it, so a caller never names it.
-    @_spi(Private) public static nonisolated(unsafe) var buildingHideMode = MPBuildingHideMode.auto {
-        didSet {
-            guard oldValue != buildingHideMode else { return }
-            NotificationCenter.default.post(name: MapboxWorldTransitionHandler.buildingHideModeChanged, object: nil)
-        }
-    }
-
     public var enableNativeMapBuildings: Bool = true {
         didSet {
             guard oldValue != enableNativeMapBuildings else { return }
@@ -129,6 +113,7 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             }
             guard changed else { return }
             Task { @MainActor [weak self] in
+                self?.applyClipLayerZoomRange(on: self?.renderer)
                 await self?.mapboxTransitionHandler?.reapplyVisibility()
             }
         }
@@ -228,6 +213,7 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     private var tileProvider: MBTileProvider?
 
     private var onStyleLoadedCancelable: AnyCancelable?
+    private var onStyleDataLoadedCancelable: AnyCancelable?
 
     @MainActor
     public func setTileProvider(tileProvider: MPTileProvider) async {
@@ -297,7 +283,46 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
 
     public var mpAccessibilityElementsHidden: Bool = false
 
-    public weak var delegate: MPMapProviderDelegate?
+    public weak var delegate: MPMapProviderDelegate? {
+        didSet {
+            // `MPMapControl` is the only thing that sets this, and it cannot exist before the solution
+            // has loaded — `MPMapsIndoors.createMapControl` guards on `shared.ready`. So this is the
+            // provider's earliest reliable "the solution is available now" signal.
+            //
+            // It has to re-run the module licensing because `_loadMapbox()` may already have run it
+            // against a nil solution, in which case the `if let solutionModules` block was skipped
+            // entirely and `isFloorPlanEnabled` / `is2dModelsEnabled` / both extrusion flags are still
+            // at their `false` defaults — for the rest of the session, since nothing else re-applies
+            // them. The visible result is a venue with no floor plan: base-map buildings showing through
+            // where the rooms should be, and the POIs that sit on them missing.
+            //
+            // That race only became reachable when `MPMapConfig` started being constructed before
+            // `load()` completed, which is what lets the map be positioned before the first frame.
+            //
+            // Only a delegate arriving carries that signal. An explicit `delegate = nil` says nothing
+            // about the solution, so it re-applies nothing; a weak reference being zeroed does not run
+            // `didSet` at all.
+            //
+            // `MPMapControl.init` writes this on the main actor, so the re-apply normally runs right
+            // here. The property is public on a non-isolated class, though, so a write from another
+            // thread must not trap: that one hands the re-apply to the main actor, the same split
+            // `padding` uses. It only stops the trap. `delegate` itself stays in the main-actor group
+            // of the SAFETY block above.
+            guard delegate != nil else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { reapplyModuleLicensing() }
+            } else {
+                Task { @MainActor [weak self] in self?.reapplyModuleLicensing() }
+            }
+        }
+    }
+
+    /// Runs the solution's module licensing again, against the current renderer. See `delegate`.
+    @MainActor
+    private func reapplyModuleLicensing() {
+        guard let renderer else { return }
+        configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: renderer)
+    }
 
     public var positionPresenter: MPPositionPresenter
 
@@ -317,6 +342,16 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
     /// Convention group (see the SAFETY block): written by `MPMapControlInternal` when it is created, read by
     /// `MBCameraOperator` and the directions renderer, all on the main actor (SPEX-2060).
     public var cameraAnimationsEnabled: Bool = true
+
+    /// Convention group (see the SAFETY block): written by `MPMapControlInternal` when it is created, read by
+    /// `MBRenderer` when an info window becomes visible, both on the main actor (SPEX-2065).
+    public var moveAccessibilityFocusToInfoWindow: Bool = true
+
+    /// Convention group (see the SAFETY block): the location whose info window VoiceOver focus last moved to, read
+    /// and written by `MBRenderer` on the main actor (SPEX-2065). Kept here rather than on the renderer, because
+    /// `_loadMapbox()` replaces the renderer on every style load when the host owns the style; a renderer starting
+    /// from nothing pulled focus back to an already open window on a light/dark style swap (MR !2079 review).
+    var focusedInfoWindowModelId: String?
 
     public var routeRenderer: MPRouteRenderer {
         // The fallback renderer registers sources on the map, which is main-actor state; see `mpOnMainSync`.
@@ -402,6 +437,13 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
 
         // `mapboxMap` is main-actor state; same fast path / logged hop as the presenter above.
         mpOnMainSync("MapBoxProvider.init") { [self] in
+            // Import config is reset when a new style's JSON loads, before `onStyleLoaded`; forget the
+            // captured building colour at that moment, synchronously, so no apply in between writes
+            // the previous style's colour into this one or has its write adopted as the style's own.
+            onStyleDataLoadedCancelable = mapView.mapboxMap.onStyleDataLoaded.observe { [weak self] event in
+                guard event.type == .style else { return }
+                MainActor.assumeIsolated { self?.mapboxTransitionHandler?.resetBuildingColorBaseline() }
+            }
             onStyleLoadedCancelable = mapView.mapboxMap.onStyleLoaded.observe { [weak self] _ in
                 // Re-apply ornament hiding on every style load: Mapbox's
                 // OrnamentsManager rebuilds its subviews when the style changes,
@@ -450,7 +492,14 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             // `lastLoadedStyleURI` would otherwise stay nil until the *next* load - which for a
             // host-owned style may never come.
             rememberLoadedStyleURI()
+            observeUserCameraGestures(on: mapView)
         }
+
+        // Declare the style swap before this provider reaches `MPMapConfig.mapProvider`, so the initial
+        // view knows not to reveal a map that is still showing the engine's own style and is about to be
+        // blanked by the replacement below. Paired with `styleLoadDidFinish` at the end of
+        // `_loadMapbox()`; the coordinator reveals regardless if that never arrives.
+        MainActor.assumeIsolated { MPInitialViewCameraCoordinator.styleLoadWillBegin(self) }
 
         Task { [weak self] in
             await self?.verifySetup()
@@ -634,9 +683,34 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         }
     }
 
+    /// Whether to fetch the MapsIndoors style, given what is known about connectivity.
+    ///
+    /// `isConnected` is `false` both when the device is offline *and* before `NetworkPathMonitor` has
+    /// delivered its first path update, because its status starts at `.unsatisfied`. Treating those the
+    /// same means a cold start that asks a few milliseconds early skips the style permanently: nothing
+    /// re-requests it, so the map spends the whole session on whatever style the host constructed its
+    /// `MapView` with — Mapbox Standard — where every MapsIndoors layer sits in the `"middle"` slot and
+    /// renders *behind* Standard's 3D buildings. The venue's POIs and floor plan are in the map and
+    /// invisible.
+    ///
+    /// So an undetermined status is treated as "try". A failed attempt is already handled
+    /// (`styleLoadFailed`, plus the late-callback recovery), whereas a skipped attempt is permanent.
+    static func shouldAttemptMapsIndoorsStyleLoad(
+        useMapsIndoorsStyle: Bool,
+        isConnected: Bool,
+        hasDeterminedNetworkStatus: Bool
+    ) -> Bool {
+        guard useMapsIndoorsStyle else { return false }
+        return isConnected || hasDeterminedNetworkStatus == false
+    }
+
     @MainActor
     private func _loadMapbox() async {
-        if useMapsIndoorsStyle, NetworkPathMonitor.shared.isConnected {
+        let shouldLoadStyle = Self.shouldAttemptMapsIndoorsStyleLoad(
+            useMapsIndoorsStyle: useMapsIndoorsStyle,
+            isConnected: NetworkPathMonitor.shared.isConnected,
+            hasDeterminedNetworkStatus: NetworkPathMonitor.shared.hasDeterminedStatus)
+        if shouldLoadStyle {
             await loadMapsIndoorsStyleResumingOnce()
         }
 
@@ -699,6 +773,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         if let r = renderer {
             configureMapsIndoorsModuleLicensing(map: mapView?.mapboxMap, renderer: r)
         }
+        // The new renderer's clipping source is empty; restore the venue outlines (SPEX-1816).
+        feedClippingSource()
         positionPresenter = MBPositionPresenter(map: mapView?.mapboxMap)
 
         if let tileProvider = tileProvider?._tileProvider {
@@ -708,6 +784,41 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         await mapboxTransitionHandler?.configureMapsIndoorsVsMapboxVisibility()
 
         await setViewModels(models: [], forceClear: true)
+
+        // Last statement on purpose: the style is loaded *and* its visibility config has been applied, so
+        // there is nothing further that would visibly change the map. See `styleLoadWillBegin` above.
+        MPInitialViewCameraCoordinator.styleLoadDidFinish(self)
+    }
+
+    /// The recognizers of the gestures that move the camera. Tap and long press only select.
+    @MainActor
+    static func cameraGestureRecognizers(of gestures: GestureManager) -> [UIGestureRecognizer] {
+        [
+            gestures.panGestureRecognizer, gestures.pinchGestureRecognizer, gestures.rotateGestureRecognizer,
+            gestures.pitchGestureRecognizer, gestures.doubleTapToZoomInGestureRecognizer,
+            gestures.doubleTouchToZoomOutGestureRecognizer, gestures.quickZoomGestureRecognizer,
+        ]
+    }
+
+    /// Tells the delegate when the user starts moving the camera, which Mapbox has no camera event for. Targets on
+    /// Mapbox's own recognizers rather than its gesture manager delegate, which a host may set for itself.
+    @MainActor
+    private func observeUserCameraGestures(on mapView: MapView) {
+        for recognizer in Self.cameraGestureRecognizers(of: mapView.gestures) {
+            recognizer.addTarget(self, action: #selector(onUserCameraGesture(_:)))
+            Self.userGestureTargetObserver?(recognizer)
+        }
+    }
+
+    /// Test injection point: called with each recognizer the provider has added its target to, which UIKit offers
+    /// no way to read back. Static because `init` adds them. Internal so `@testable import` tests can check them.
+    @MainActor internal static var userGestureTargetObserver: ((UIGestureRecognizer) -> Void)?
+
+    /// `@MainActor`: a gesture recogniser target, invoked on the main thread. A continuous gesture reports
+    /// `.began`; a double tap reports only `.ended`. A repeat is harmless.
+    @objc @MainActor func onUserCameraGesture(_ sender: UIGestureRecognizer) {
+        guard sender.state == .began || sender.state == .ended else { return }
+        delegate?.cameraWillMoveByUserGesture()
     }
 
     /// `@MainActor`: a gesture recogniser target, invoked on the main thread; the body reads the map view.
@@ -996,10 +1107,15 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         }
     }
 
+    /// Test injection point for the solution's module list. Tests have no loaded solution, so without
+    /// this there is nothing for the licensing to apply and the re-apply cannot be asserted at all.
+    /// Mirrors `styleLoaderOverride` / `mapboxMapOverride` elsewhere in this module.
+    @MainActor internal var solutionModulesOverride: [String]?
+
     @MainActor
     private func configureMapsIndoorsModuleLicensing(map _: MapboxMap?, renderer: MBRenderer) {
         do {
-            if let solutionModules = MPMapsIndoors.shared.solution?.modules {
+            if let solutionModules = solutionModulesOverride ?? MPMapsIndoors.shared.solution?.modules {
                 if solutionModules.contains("z22") {
                     try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions(maxZoom: 25))
                 } else {
@@ -1010,6 +1126,7 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
                 renderer.is2dModelsEnabled = solutionModules.contains("2dmodels")
                 renderer.isFloorPlanEnabled = solutionModules.contains("floorplan")
             }
+            applyClipLayerZoomRange(on: renderer)
             try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions())
         } catch {}
     }
@@ -1035,10 +1152,42 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         }
     }
 
-    public func applyClippingGeometries(_ geometries: [MPPolygonGeometry]) async {
-        let isClippingAllowed = MPMapsIndoors.shared.solution?.modules.contains("cliplayer") ?? false
-        guard let mapView = mapView, isClippingAllowed == true else { return }
+    /// Whether the solution has the `cliplayer` module, which clips the base map at every zoom.
+    private var isClipLayerModuleEnabled: Bool {
+        MPMapsIndoors.shared.solution?.modules.contains("cliplayer") ?? false
+    }
 
+    /// Points the clip layer's zoom range at the current module and transition level. See
+    /// `MBRenderer.clipLayerMinZoom(isClipLayerModuleEnabled:transitionLevel:)`.
+    @MainActor
+    private func applyClipLayerZoomRange(on renderer: MBRenderer?) {
+        renderer?.applyClipLayerMinZoom(
+            MBRenderer.clipLayerMinZoom(isClipLayerModuleEnabled: isClipLayerModuleEnabled, transitionLevel: transitionLevel))
+    }
+
+    /// The venue outlines last handed to the clip layer. Kept so a style reload can restore them:
+    /// the new renderer starts with an empty clipping source, and the map control only sends the
+    /// outlines again when the venue changes.
+    @MainActor private(set) var clippingGeoJSON: GeoJSONObject?
+
+    /// Writes the kept venue outlines to the clipping source, setting the zoom range first so they
+    /// never clip below the transition level, even before the first `setViewModels`.
+    @MainActor
+    func feedClippingSource() {
+        guard let clippingGeoJSON, let mapboxMap = mapView?.mapboxMap else { return }
+        applyClipLayerZoomRange(on: renderer)
+        mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.clippingSource, geoJSON: clippingGeoJSON)
+        clippingSourceWriteObserver?(clippingGeoJSON)
+    }
+
+    /// Test injection point: called with each write to the clipping source, which Mapbox offers no
+    /// way to read back. Internal so `@testable import` tests can count the writes.
+    @MainActor internal var clippingSourceWriteObserver: ((GeoJSONObject) -> Void)?
+
+    /// Feeds the venue outlines to the clip layer. Fed whether or not the solution has the
+    /// `cliplayer` module: without it the clip layer still applies above the transition level
+    /// (SPEX-1816), and its `minzoom` is what decides where clipping starts.
+    public func applyClippingGeometries(_ geometries: [MPPolygonGeometry]) async {
         var features = [Feature]()
         for geometry in geometries {
             let coordinates = geometry.coordinates.map { $0.map(\.coordinate) }
@@ -1049,9 +1198,8 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         let newGeoJSON: GeoJSONObject = .featureCollection(FeatureCollection(features: features)).geoJSONObject
 
         await MainActor.run {
-            mapView.mapboxMap?.updateGeoJSONSource(
-                withId: Constants.SourceIDs.clippingSource,
-                geoJSON: newGeoJSON)
+            clippingGeoJSON = newGeoJSON
+            feedClippingSource()
         }
     }
 }

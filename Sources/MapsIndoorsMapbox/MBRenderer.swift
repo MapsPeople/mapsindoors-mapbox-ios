@@ -50,7 +50,18 @@ class MBRenderer {
     nonisolated(unsafe) private var lock = UnfairLock()
 
     // Dictionary to store created info windows
-    private var infoWindows = MPThreadSafeDictionary<String, ViewAnnotation>()
+    /// Internal rather than `private` so tests can reach a presented info window's annotation, and remove one the way a
+    /// floor change does.
+    var infoWindows = [String: ViewAnnotation]()
+
+    /// The location whose info window VoiceOver focus last moved to, so focus moves once per selection: not again
+    /// when the window is re-created (floor change and back, a filter, a zoom range) or scrolls back on screen.
+    /// Cleared when that location is rendered unselected (SPEX-2065). Stored on the provider, which outlives this
+    /// renderer across style loads, so a new renderer does not take focus again for the same selection.
+    private(set) var focusedInfoWindowModelId: String? {
+        get { provider?.focusedInfoWindowModelId }
+        set { provider?.focusedInfoWindowModelId = newValue }
+    }
 
     private weak var provider: MapBoxProvider?
 
@@ -65,8 +76,7 @@ class MBRenderer {
 
         onImageUnusedCancelable = map?.onStyleImageRemoveUnused.observe { [weak self] image in
             Task { @MainActor [weak self] in
-                try self?.map?.removeImage(withId: image.imageId)
-                self?.imagesAdded.removeValue(forKey: image.imageId)
+                self?.evictUnusedImage(withId: image.imageId)
             }
         }
 
@@ -715,6 +725,36 @@ class MBRenderer {
         didSet { if oldValue != isFloorPlanEnabled { lock.locked { modelCache.removeAll() } } }
     }
 
+    /// The zoom from which the clip layer cuts the base map's 3D models out of the venue outlines.
+    ///
+    /// With the `cliplayer` module the solution has asked for clipping at every zoom. Without it,
+    /// clipping starts at the transition level, where MapsIndoors takes over from the base map.
+    /// Above that level the base map's buildings are faded, but a fade keeps their geometry, and
+    /// any z-elevated symbol over them (the elevated 2D-model layer) is still lifted onto their
+    /// rooftops under a pitched camera. Clipping removes the geometry itself (SPEX-1816), as the
+    /// Android SDK does since SPEX-1758.
+    ///
+    /// The transition level is in Mapbox zoom, the same unit as a layer's `minzoom`.
+    nonisolated static func clipLayerMinZoom(isClipLayerModuleEnabled: Bool, transitionLevel: Int) -> Double {
+        isClipLayerModuleEnabled ? 0 : Double(transitionLevel)
+    }
+
+    private var appliedClipLayerMinZoom: Double?
+
+    /// Writes the clip layer's `minzoom`, skipping the write when it is already applied. The cache
+    /// cannot go stale: the clip layer is persistent, so it keeps its `minzoom` across a style
+    /// switch that keeps this renderer, and a full reload builds a new renderer with an empty cache.
+    func applyClipLayerMinZoom(_ minZoom: Double) {
+        // Without the layer the write would throw, and log, on every render.
+        guard minZoom != appliedClipLayerMinZoom, let map, map.layerExists(withId: Constants.LayerIDs.clippingLayer) else { return }
+        do {
+            try map.updateLayer(withId: Constants.LayerIDs.clippingLayer, type: ClipLayer.self) { $0.minZoom = minZoom }
+            appliedClipLayerMinZoom = minZoom
+        } catch {
+            MPLog.mapbox.error("Failed to set the clip layer's minzoom: \(error.localizedDescription)")
+        }
+    }
+
     var featureExtrusionOpacity: Double = 0 {
         didSet {
             if oldValue != featureExtrusionOpacity {
@@ -900,16 +940,13 @@ class MBRenderer {
         try Task.checkCancellation()
 
         // MainActor-only side-effects, lifted out of the fan-out so the
-        // task-group below holds no `any MPViewModel` captures. Pair each
-        // input with its source model via `zip` so the loop can never drift
-        // from the snapshot order if filtering is added later.
+        // task-group below holds no `any MPViewModel` captures. Images are
+        // checked on feature-cache hits too: Mapbox evicts unused style images
+        // (see `evictUnusedImage`) while a cached feature still references
+        // them. Both calls are no-ops while the registered image is unchanged.
         for model in models {
             try Task.checkCancellation()
             await updateInfoWindow(for: model)
-        }
-        for (input, model) in zip(inputs, models) {
-            let cached = lock.locked { self.modelCache[input.cacheKey] }
-            if cached != nil { continue }
             try Task.checkCancellation()
             await updateImage(for: model)
             try Task.checkCancellation()
@@ -1056,8 +1093,31 @@ class MBRenderer {
             if let point = model.marker?.geometry.coordinates as? MPPoint, let location = MPMapsIndoors.shared.locationWith(locationId: model.id) {
                 await createOrUpdateInfoWindow(for: model, at: point, location: location)
             }
-        } else if infoWindows[model.id] != nil {
-            await removeInfoWindow(for: model)
+        } else {
+            infoWindowDeselected(modelId: model.id)
+            if infoWindows[model.id] != nil {
+                await removeInfoWindow(for: model)
+            }
+        }
+    }
+
+    /// The location is rendered without its info window, so it is no longer selected: selecting it again is a new
+    /// selection, and its info window may take focus again.
+    func infoWindowDeselected(modelId: String) {
+        if focusedInfoWindowModelId == modelId {
+            focusedInfoWindowModelId = nil
+        }
+    }
+
+    /// Mapbox shows an info window when it has placed it, which can be a frame or more after it was added, or
+    /// later still if it was off screen. Focus moves then, once per selection and only if the host allows it.
+    func infoWindowBecameVisible(_ infoWindowView: UIView, modelId: String) {
+        guard provider?.moveAccessibilityFocusToInfoWindow ?? true,
+            modelId != focusedInfoWindowModelId,
+            let mapView
+        else { return }
+        if MPAccessibilityFocus.moveFocus(toInfoWindow: infoWindowView, on: mapView) {
+            focusedInfoWindowModelId = modelId
         }
     }
 
@@ -1092,25 +1152,41 @@ class MBRenderer {
         guard infoWindows[model.id] == nil else { return }
 
         if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
-            let view = ViewAnnotation(coordinate: point.coordinate, view: infoWindowView)
+            presentInfoWindow(infoWindowView, at: point.coordinate, offsetX: xOffset, offsetY: yOffset, modelId: model.id)
+        }
+    }
 
-            // Ensure it is shown dispite anything else
-            view.allowZElevate = true
-            view.allowOverlap = true
-            view.ignoreCameraPadding = true
-            view.allowOverlapWithPuck = true
+    /// Adds `infoWindowView` to the map above `coordinate`, and takes VoiceOver to it when it becomes visible.
+    /// Internal (not `private`) so tests can present one without a loaded solution behind it.
+    func presentInfoWindow(
+        _ infoWindowView: UIView, at coordinate: CLLocationCoordinate2D, offsetX: Double, offsetY: Double,
+        modelId: String
+    ) {
+        let view = ViewAnnotation(coordinate: coordinate, view: infoWindowView)
 
-            // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
-            view.variableAnchors = [
-                ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: xOffset, offsetY: yOffset)
-            ]
+        // Ensure it is shown dispite anything else
+        view.allowZElevate = true
+        view.allowOverlap = true
+        view.ignoreCameraPadding = true
+        view.allowOverlapWithPuck = true
 
-            // Remember the view annotation
-            infoWindows[model.id] = view
+        // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
+        view.variableAnchors = [
+            ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: offsetX, offsetY: offsetY)
+        ]
 
-            // Add the view annotation to the map
-            mapView?.viewAnnotations.add(view)
-            setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: model.id)
+        // Remember the view annotation
+        infoWindows[modelId] = view
+
+        // Add the view annotation to the map
+        mapView?.viewAnnotations.add(view)
+        setupInfoWindowTapRecognizer(infoWindowView: view.view, modelId: modelId)
+
+        // Take VoiceOver to it once Mapbox has actually shown it (SPEX-2065): the view is in the hierarchy from
+        // here on but hidden until placed, and hidden again whenever it is off screen.
+        view.onVisibilityChanged = { [weak self, weak infoWindowView] visible in
+            guard visible, let self, let infoWindowView else { return }
+            self.infoWindowBecameVisible(infoWindowView, modelId: modelId)
         }
     }
 
@@ -1118,29 +1194,39 @@ class MBRenderer {
     /// enabling O(1) change detection without expensive PNG encoding or MD5 hashing.
     private var imagesAdded = [String: ObjectIdentifier]()
 
+    /// Removes a style image Mapbox reports as unused (e.g. icons hidden below their display rule's
+    /// `zoomFrom`) and forgets it, so the next render that needs it registers it again.
+    func evictUnusedImage(withId id: String) {
+        try? map?.removeImage(withId: id)
+        imagesAdded.removeValue(forKey: id)
+    }
+
     private func updateImage(for model: any MPViewModel) async {
         guard let id = model.marker?.id else { return }
 
         if let icon = model.data[.icon] as? UIImage, model.marker?.properties[.hasImage] as? Bool == true {
             let imageIdentity = ObjectIdentifier(icon)
-            guard imagesAdded[id] != imageIdentity else { return }
-            // Never let one bad image abort the render (see update2DModel).
-            do {
-                try styleImaging?.registerImage(icon, id: id)
-                imagesAdded[id] = imageIdentity
-            } catch let error as StyleError {
-                // Mapbox rejected the asset itself (e.g. "Raster image reference has invalid data size").
-                // The bytes won't improve on retry, so skip and mark handled — logged once, not every render.
-                MPLog.mapbox.error("Skipping invalid marker image \(id): \(error)")
-                imagesAdded[id] = imageIdentity
-            } catch {
-                // Unexpected (non-StyleError) failure: don't abort the render, and don't mark handled,
-                // so a transient failure is retried on the next render instead of being suppressed.
-                MPLog.mapbox.error("Unexpected error adding marker image \(id): \(error)")
+            // Not an early return: the graphic label below must still be checked.
+            if imagesAdded[id] != imageIdentity {
+                // Never let one bad image abort the render (see update2DModel).
+                do {
+                    try styleImaging?.registerImage(icon, id: id)
+                    imagesAdded[id] = imageIdentity
+                } catch let error as StyleError {
+                    // Mapbox rejected the asset itself (e.g. "Raster image reference has invalid data size").
+                    // The bytes won't improve on retry, so skip and mark handled — logged once, not every render.
+                    MPLog.mapbox.error("Skipping invalid marker image \(id): \(error)")
+                    imagesAdded[id] = imageIdentity
+                } catch {
+                    // Unexpected (non-StyleError) failure: don't abort the render, and don't mark handled,
+                    // so a transient failure is retried on the next render instead of being suppressed.
+                    MPLog.mapbox.error("Unexpected error adding marker image \(id): \(error)")
+                }
             }
-        } else {
+        } else if imagesAdded.removeValue(forKey: id) != nil {
+            // Only images this renderer tracks: this runs every render, and an untracked image is
+            // either gone already or unreachable (the layer reads it only while `hasImage` is true).
             try? map?.removeImage(withId: id)
-            imagesAdded.removeValue(forKey: id)
         }
 
         if let graphicImage = model.data[.graphicLabelImage] as? UIImage,

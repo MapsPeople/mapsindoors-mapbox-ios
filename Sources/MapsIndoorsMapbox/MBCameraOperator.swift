@@ -54,10 +54,15 @@ class MBCameraOperator: MPCameraOperator {
     nonisolated init() {}
 
     func move(target: CLLocationCoordinate2D, zoom: Float) {
+        // `zoom` is on the Google / 256px-tile scale, matching `MPCameraPosition.zoom` — which this
+        // module already converts the same way in `MBCameraPosition` (the getter adds 1, and
+        // `camera(target:zoom:)` subtracts it). Mapbox renders 512px tiles and so sits one level below.
+        // Writing the value straight through opened the map a full zoom level too close, and the app's
+        // own `goTo` then corrected it — the visible jump a seeded camera exists to prevent.
         view?.mapboxMap.setCamera(to: CameraOptions(
             center: target,
             padding: mapProvider?.padding,
-            zoom: CGFloat(zoom)))
+            zoom: CGFloat(zoom - 1)))
     }
 
     func animate(pos: MPCameraPosition) async {
@@ -68,6 +73,18 @@ class MBCameraOperator: MPCameraOperator {
             bearing: pos.bearing,
             pitch: pos.viewingAngle)
         await apply(newCamera)
+    }
+
+    func move(bounds: MPGeoBounds) {
+        guard let view else { return }
+        do {
+            let camera = try view.mapboxMap.camera(
+                for: [bounds.southWest, bounds.northEast], camera: CameraOptions(),
+                coordinatesPadding: mapProvider?.padding, maxZoom: nil, offset: nil)
+            view.mapboxMap.setCamera(to: camera)
+        } catch {
+            MPLog.mapbox.error("Error trying to move the Mapbox camera to bounds")
+        }
     }
 
     func animate(bounds: MPGeoBounds) async {
