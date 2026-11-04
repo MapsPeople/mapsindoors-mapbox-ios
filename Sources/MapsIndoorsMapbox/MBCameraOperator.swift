@@ -59,10 +59,11 @@ class MBCameraOperator: MPCameraOperator {
         // `camera(target:zoom:)` subtracts it). Mapbox renders 512px tiles and so sits one level below.
         // Writing the value straight through opened the map a full zoom level too close, and the app's
         // own `goTo` then corrected it — the visible jump a seeded camera exists to prevent.
-        view?.mapboxMap.setCamera(to: CameraOptions(
-            center: target,
-            padding: mapProvider?.padding,
-            zoom: CGFloat(zoom - 1)))
+        view?.mapboxMap.setCamera(
+            to: CameraOptions(
+                center: target,
+                padding: mapProvider?.padding,
+                zoom: CGFloat(zoom - 1)))
     }
 
     func animate(pos: MPCameraPosition) async {

@@ -376,7 +376,8 @@ final class MBRouteRenderer: MPRouteRenderer {
                     // superseded animator (e.g. a live type switch replaced it); otherwise an old flow/comet
                     // tick would re-trim or re-window the layer under the new animation.
                     guard let self, generation == self.animationGeneration,
-                        let mapView = self.mapView, mapView.mapboxMap.isStyleLoaded else { return }
+                        let mapView = self.mapView, mapView.mapboxMap.isStyleLoaded
+                    else { return }
                     switch animationType {
                     case .pulse:
                         // Oscillate opacity dim → bright → dim over each loop; never fully vanish.
@@ -481,10 +482,14 @@ final class MBRouteRenderer: MPRouteRenderer {
     private nonisolated static func rgbaString(from color: UIColor) -> String {
         var normalized = color
         if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
-            let converted = color.cgColor.converted(to: srgb, intent: .defaultIntent, options: nil) {
+            let converted = color.cgColor.converted(to: srgb, intent: .defaultIntent, options: nil)
+        {
             normalized = UIColor(cgColor: converted)
         }
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
         normalized.getRed(&r, green: &g, blue: &b, alpha: &a)
         return "rgba(\(Int((r * 255).rounded())), \(Int((g * 255).rounded())), \(Int((b * 255).rounded())), \(a))"
     }
@@ -664,5 +669,4 @@ final class MBRouteRenderer: MPRouteRenderer {
 
         return json
     }
-
 }

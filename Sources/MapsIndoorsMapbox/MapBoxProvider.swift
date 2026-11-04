@@ -509,7 +509,9 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
 
         // Hand the cache provider a reader for the style rather than a fixed URI: the host can
         // set its own style at any point after this, and the cache has to follow it or the map
-        // goes blank offline (SPEX-2553).
+        // goes blank offline (SPEX-2553). Assigned rather than registered-if-absent, so it also
+        // replaces one `registerMapboxBaseMapCache()` made before any map, which cannot follow a
+        // style (SPEX-2895).
         MPMapsIndoors.baseMapCacheProvider = MBBaseMapCacheProvider(
             configuredStyleURI: { [weak self] in self?.styleURIForCaching })
     }

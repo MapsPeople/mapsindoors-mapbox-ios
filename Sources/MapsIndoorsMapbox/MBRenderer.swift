@@ -149,18 +149,26 @@ class MBRenderer {
         _model3dGeoJsonSource?.tolerance = 0.5
         try map?.addSource(_model3dGeoJsonSource!)
 
-        _extrusionGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSourceExtrusions)
-        _extrusionGeoJsonSource?.data = nil
-        _extrusionGeoJsonSource?.tolerance = 0.2
+        _extrusionGeoJsonSource = Self.exactGeometrySource(id: Constants.SourceIDs.geoJsonSourceExtrusions)
         try map?.addSource(_extrusionGeoJsonSource!)
 
-        _wallsGeoJsonSource = GeoJSONSource(id: Constants.SourceIDs.geoJsonSourceWalls)
-        _wallsGeoJsonSource?.data = nil
-        _wallsGeoJsonSource?.tolerance = 0.2
+        _wallsGeoJsonSource = Self.exactGeometrySource(id: Constants.SourceIDs.geoJsonSourceWalls)
         try map?.addSource(_wallsGeoJsonSource!)
 
         _clippingSource = GeoJSONSource(id: Constants.SourceIDs.clippingSource)
         try map?.addSource(_clippingSource!)
+    }
+
+    /// A source for extrusions, cut without simplification at every zoom up to 22. Slope bands and wall
+    /// outlines are fractions of a metre wide: simplified (`tolerance`) or overscaled from z18 tiles (the
+    /// default `maxzoom`), they lose or change shape at lower zooms, and as tiles swap during a pan or zoom
+    /// the extrusions flicker.
+    nonisolated static func exactGeometrySource(id: String) -> GeoJSONSource {
+        var source = GeoJSONSource(id: id)
+        source.data = nil
+        source.tolerance = 0
+        source.maxzoom = 22
+        return source
     }
 
     // MARK: Layers: adding and setting properties

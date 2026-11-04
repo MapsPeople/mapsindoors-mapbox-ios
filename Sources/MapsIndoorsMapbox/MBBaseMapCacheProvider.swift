@@ -1,8 +1,8 @@
 import CoreLocation
 import Foundation
 import MapboxMaps
-import os
 @_spi(Private) import MapsIndoors
+import os
 
 /// Mapbox implementation of ``MapProviderBaseMapCache`` that uses ``TileStore`` to
 /// pre-download base-map tiles for a set of geographic regions.
@@ -32,7 +32,6 @@ import os
 ///      The one style the SDK itself retired (SPEX-2517) is removed on the next sync; see
 ///      ``retiredMapsIndoorsStyleURI``.
 final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable {
-
     private let tileStore: TileStore
     private let offlineManager: OfflineManager
     /// Reads the style URI the map provider is *configured* to render, or `nil` when there is
@@ -190,10 +189,11 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
                     ) { result in
                         switch result {
                         case .success(let estimate):
-                            continuation.resume(returning: MPBaseMapSizeEstimate(
-                                transferSize: estimate.transferSize,
-                                storageSize: estimate.storageSize,
-                                errorMargin: estimate.errorMargin))
+                            continuation.resume(
+                                returning: MPBaseMapSizeEstimate(
+                                    transferSize: estimate.transferSize,
+                                    storageSize: estimate.storageSize,
+                                    errorMargin: estimate.errorMargin))
                         case .failure(let error):
                             continuation.resume(throwing: error)
                         }
@@ -266,7 +266,8 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
                 self.tileStore.allTileRegions { result in
                     switch result {
                     case .success(let regions):
-                        let total = regions
+                        let total =
+                            regions
                             .filter { wanted.contains($0.id) }
                             .reduce(UInt64(0)) { $0 + $1.completedResourceSize }
                         continuation.resume(returning: total)
@@ -508,11 +509,13 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 self.runOnOwningActor {
-                    guard let options = StylePackLoadOptions(
-                        glyphsRasterizationMode: .ideographsRasterizedLocally,
-                        metadata: nil,
-                        acceptExpired: false
-                    ) else {
+                    guard
+                        let options = StylePackLoadOptions(
+                            glyphsRasterizationMode: .ideographsRasterizedLocally,
+                            metadata: nil,
+                            acceptExpired: false
+                        )
+                    else {
                         continuation.resume(throwing: MPError.unknownError)
                         return
                     }

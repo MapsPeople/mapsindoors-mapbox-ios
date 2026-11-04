@@ -24,7 +24,6 @@ import QuartzCore
 ///   the contract is the main *thread* the link's run loop lives on, and `invalidate()` is also reached from the
 ///   `CADisplayLink` callback (`step`) — a run-loop context where `.onQueue(.main)` can spuriously fail.
 final class RouteLineAnimator {
-
     /// How the `0...1` progress repeats once it reaches the end of a cycle.
     enum RepeatMode {
         /// Run once, then finish (fires `onEnd`).
@@ -61,7 +60,7 @@ final class RouteLineAnimator {
 
         func sample(elapsed: TimeInterval) -> Sample {
             let active = elapsed - startDelay
-            if active <= 0 { return Sample(progress: easing.apply(0), finished: false) }   // still in the start delay
+            if active <= 0 { return Sample(progress: easing.apply(0), finished: false) }  // still in the start delay
             if duration <= 0 { return Sample(progress: easing.apply(1), finished: true) }  // degenerate: finish at once
             let cycles = active / duration
             switch repeatMode {
@@ -98,12 +97,14 @@ final class RouteLineAnimator {
     /// Whether the animator is currently ticking. Read by the renderers to skip a draw once it has stopped.
     private(set) var isRunning = false
 
-    init(duration: TimeInterval,
-         repeatMode: RepeatMode = .once,
-         startDelay: TimeInterval = 0,
-         easing: Easing = .linear,
-         onProgress: @escaping (Double) -> Void,
-         onEnd: (() -> Void)? = nil) {
+    init(
+        duration: TimeInterval,
+        repeatMode: RepeatMode = .once,
+        startDelay: TimeInterval = 0,
+        easing: Easing = .linear,
+        onProgress: @escaping (Double) -> Void,
+        onEnd: (() -> Void)? = nil
+    ) {
         self.timeline = Timeline(duration: duration, startDelay: startDelay, repeatMode: repeatMode, easing: easing)
         self.onProgress = onProgress
         self.onEnd = onEnd
@@ -131,7 +132,7 @@ final class RouteLineAnimator {
         isRunning = true
         startTimestamp = nil
         let link = CADisplayLink(target: Proxy(self), selector: #selector(Proxy.step(_:)))
-        link.add(to: .main, forMode: .common)   // .common so the flow survives scroll / gesture tracking
+        link.add(to: .main, forMode: .common)  // .common so the flow survives scroll / gesture tracking
         displayLink = link
     }
 

@@ -33,8 +33,8 @@ import Foundation
 
 #if !os(WASI)
 
-@available(*, deprecated, message: "Do not use")
-public let LRUCacheMemoryWarningNotification: NSNotification.Name = _notification
+    @available(*, deprecated, message: "Do not use")
+    public let LRUCacheMemoryWarningNotification: NSNotification.Name = _notification
 
 #endif
 
@@ -56,7 +56,7 @@ public final class LRUCache<Key: Hashable & Sendable, Value>: @unchecked Sendabl
     private let lock: NSLock = .init()
 
     #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
-    private let memoryPressureSource: DispatchSourceMemoryPressure?
+        private let memoryPressureSource: DispatchSourceMemoryPressure?
     #endif
 
     /// Initialize the cache with the specified `totalCostLimit` and `countLimit`
@@ -70,71 +70,72 @@ public final class LRUCache<Key: Hashable & Sendable, Value>: @unchecked Sendabl
         self.clearsOnMemoryPressure = clearsOnMemoryPressure
 
         #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
-        if clearsOnMemoryPressure {
-            self.memoryPressureSource = DispatchSource
-                .makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
-            memoryPressureSource?.setEventHandler { [weak self] in
-                self?.removeAll()
+            if clearsOnMemoryPressure {
+                self.memoryPressureSource =
+                    DispatchSource
+                    .makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
+                memoryPressureSource?.setEventHandler { [weak self] in
+                    self?.removeAll()
+                }
+                memoryPressureSource?.resume()
+            } else {
+                self.memoryPressureSource = nil
             }
-            memoryPressureSource?.resume()
-        } else {
-            self.memoryPressureSource = nil
-        }
         #endif
 
         #if !os(WASI)
-        if clearsOnMemoryPressure {
-            registerNotifications(for: .default)
-        }
+            if clearsOnMemoryPressure {
+                registerNotifications(for: .default)
+            }
         #endif
     }
 
     #if !os(WASI)
 
-    @available(*, deprecated, message: "Do not use")
-    public convenience init(
-        totalCostLimit: Int = .max,
-        countLimit: Int = .max,
-        notificationCenter: NotificationCenter
-    ) {
-        self.init(totalCostLimit: totalCostLimit, countLimit: countLimit)
-        registerNotifications(for: notificationCenter)
-    }
-
-    private var token: AnyObject?
-    private var notificationCenter: NotificationCenter = .default
-
-    func registerNotifications(for notificationCenter: NotificationCenter) {
-        token.map(self.notificationCenter.removeObserver)
-        self.notificationCenter = notificationCenter
-        token = notificationCenter.addObserver(
-            forName: _notification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.removeAll()
+        @available(*, deprecated, message: "Do not use")
+        public convenience init(
+            totalCostLimit: Int = .max,
+            countLimit: Int = .max,
+            notificationCenter: NotificationCenter
+        ) {
+            self.init(totalCostLimit: totalCostLimit, countLimit: countLimit)
+            registerNotifications(for: notificationCenter)
         }
-    }
 
-    deinit {
-        token.map(notificationCenter.removeObserver)
+        private var token: AnyObject?
+        private var notificationCenter: NotificationCenter = .default
 
-        #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
-        self.memoryPressureSource?.cancel()
-        #endif
-    }
+        func registerNotifications(for notificationCenter: NotificationCenter) {
+            token.map(self.notificationCenter.removeObserver)
+            self.notificationCenter = notificationCenter
+            token = notificationCenter.addObserver(
+                forName: _notification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.removeAll()
+            }
+        }
+
+        deinit {
+            token.map(notificationCenter.removeObserver)
+
+            #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
+                self.memoryPressureSource?.cancel()
+            #endif
+        }
 
     #endif
 }
 
-public extension LRUCache {
+extension LRUCache {
     /// The current total cost of values in the cache
-    var totalCost: Int {
+    public var totalCost: Int {
         atomic { _totalCost }
     }
 
     /// The maximum total cost permitted
-    var totalCostLimit: Int {
+    public var totalCostLimit: Int {
         get { atomic { _totalCostLimit } }
         set {
             atomic {
@@ -145,12 +146,12 @@ public extension LRUCache {
     }
 
     /// The number of values currently stored in the cache
-    var count: Int {
+    public var count: Int {
         atomic { _values.count }
     }
 
     /// The maximum number of values permitted
-    var countLimit: Int {
+    public var countLimit: Int {
         get { atomic { _countLimit } }
         set {
             atomic {
@@ -161,23 +162,23 @@ public extension LRUCache {
     }
 
     /// Is the cache empty?
-    var isEmpty: Bool {
+    public var isEmpty: Bool {
         atomic { _values.isEmpty }
     }
 
     /// All keys in the cache, in no particular order
-    var keys: some Collection<Key> {
+    public var keys: some Collection<Key> {
         atomic { _values.keys }
     }
 
     /// All values in the cache, in no particular order
-    var values: some Collection<Value> {
+    public var values: some Collection<Value> {
         atomic { _values.values.map(\.value) }
     }
 
     /// All keys in the cache, ordered from least recently used to most recently used
     /// Note: this is orders of magnitude slower to compute than `keys`
-    var orderedKeys: [Key] {
+    public var orderedKeys: [Key] {
         atomic {
             var keys = [Key]()
             keys.reserveCapacity(_values.count)
@@ -192,7 +193,7 @@ public extension LRUCache {
 
     /// All values in the cache, ordered from least recently used to most recently used
     /// Note: this is orders of magnitude slower to compute than `values`
-    var orderedValues: [Value] {
+    public var orderedValues: [Value] {
         atomic {
             var values = [Value]()
             values.reserveCapacity(_values.count)
@@ -207,14 +208,14 @@ public extension LRUCache {
 
     /// All keys in the cache, ordered from least recently used to most recently used
     @available(*, deprecated, renamed: "orderedKeys")
-    var allKeys: [Key] { orderedKeys }
+    public var allKeys: [Key] { orderedKeys }
 
     /// All values in the cache, ordered from least recently used to most recently used
     @available(*, deprecated, renamed: "orderedValues")
-    var allValues: [Value] { orderedValues }
+    public var allValues: [Value] { orderedValues }
 
     /// Insert a value into the cache with optional `cost` and mark it as most recently used
-    func setValue(_ value: Value?, forKey key: Key, cost: Int = 0) {
+    public func setValue(_ value: Value?, forKey key: Key, cost: Int = 0) {
         guard let value else {
             removeValue(forKey: key)
             return
@@ -241,12 +242,12 @@ public extension LRUCache {
     }
 
     /// Check if a value exists in the cache without affecting how recently it was used
-    func hasValue(forKey key: Key) -> Bool {
+    public func hasValue(forKey key: Key) -> Bool {
         atomic { _values[key] != nil }
     }
 
     /// Fetch a value from the cache and mark it as most recently used
-    func value(forKey key: Key) -> Value? {
+    public func value(forKey key: Key) -> Value? {
         atomic {
             if let container = _values[key] {
                 remove(container)
@@ -258,7 +259,7 @@ public extension LRUCache {
     }
 
     /// Remove a value  from the cache and return it
-    @discardableResult func removeValue(forKey key: Key) -> Value? {
+    @discardableResult public func removeValue(forKey key: Key) -> Value? {
         atomic {
             guard let container = _values.removeValue(forKey: key) else {
                 return nil
@@ -270,7 +271,7 @@ public extension LRUCache {
     }
 
     /// Remove all values from the cache
-    func removeAll() {
+    public func removeAll() {
         atomic {
             _values.removeAll()
             head = nil
@@ -281,19 +282,19 @@ public extension LRUCache {
 
     /// Remove all values from the cache
     @available(*, deprecated, renamed: "removeAll")
-    func removeAllValues() { removeAll() }
+    public func removeAllValues() { removeAll() }
 }
 
 #if canImport(UIKit) && !os(watchOS)
-import UIKit
+    import UIKit
 
-private let _notification: NSNotification.Name = UIApplication.didReceiveMemoryWarningNotification
+    private let _notification: NSNotification.Name = UIApplication.didReceiveMemoryWarningNotification
 #elseif !os(WASI)
-private let _notification: NSNotification.Name = .init("LRUCacheMemoryWarningNotification")
+    private let _notification: NSNotification.Name = .init("LRUCacheMemoryWarningNotification")
 #endif
 
-private extension LRUCache {
-    final class Container {
+extension LRUCache {
+    fileprivate final class Container {
         var value: Value
         var cost: Int
         let key: Key
@@ -308,14 +309,14 @@ private extension LRUCache {
     }
 
     /// Atomic access
-    func atomic<T>(_ action: () -> T) -> T {
+    fileprivate func atomic<T>(_ action: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
         return action()
     }
 
     /// Remove container from list (must be called inside lock)
-    func remove(_ container: Container) {
+    fileprivate func remove(_ container: Container) {
         if head === container {
             head = container.next
         }
@@ -328,7 +329,7 @@ private extension LRUCache {
     }
 
     /// Append container to list (must be called inside lock)
-    func append(_ container: Container) {
+    fileprivate func append(_ container: Container) {
         assert(container.next == nil)
         if head == nil {
             head = container
@@ -339,9 +340,9 @@ private extension LRUCache {
     }
 
     /// Remove expired values (must be called inside lock)
-    func clean() {
+    fileprivate func clean() {
         while _totalCost > _totalCostLimit || _values.count > _countLimit,
-              let container = head
+            let container = head
         {
             remove(container)
             _values.removeValue(forKey: container.key)

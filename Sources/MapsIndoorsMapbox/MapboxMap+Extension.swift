@@ -140,7 +140,8 @@ extension MapboxMap {
                         // land in the correct ascending order, not at the slot's top.
                         try addPersistentLayer(layer, layerPosition: .above(prevId))
                     } else if let nextExistingSameSlotId = layersInAscendingOrder[(index + 1)...]
-                        .first(where: { Constants.slotForLayerId[$0.id]?.rawValue == slotKey && layerExists(withId: $0.id) })?.id {
+                        .first(where: { Constants.slotForLayerId[$0.id]?.rawValue == slotKey && layerExists(withId: $0.id) })?.id
+                    {
                         // No same-slot layer below this one is present yet, but a later one
                         // already exists — insert below it, or an unpositioned add would land
                         // at the slot's top, covering everything (e.g. a re-added TILE_LAYER
