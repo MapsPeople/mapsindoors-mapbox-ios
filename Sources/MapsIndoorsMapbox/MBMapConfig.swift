@@ -4,6 +4,10 @@ import MapsIndoors
 
 /// Extending MPMapConfig with an initializer for Mapbox
 @objc extension MPMapConfig {
+    /// Creates a configuration that renders MapsIndoors on `mapBoxView`.
+    ///
+    /// Call it on the main thread. Called on another thread, its main-thread work waits for the main thread, so a
+    /// caller that blocks the main thread until this returns deadlocks.
     public convenience init(mapBoxView: MapView, accessToken: String) {
         self.init()
         let mapboxProvider = MapBoxProvider(mapView: mapBoxView, accessToken: accessToken)

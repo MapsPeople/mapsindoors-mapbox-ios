@@ -21,9 +21,24 @@ extension BinaryFloatingPoint {
 /// hop to the main actor with a `Task`, where the main-queue async each used to open with was. `moveCamera`
 /// always ran synchronously on its caller (the main-actor directions renderer) and keeps doing so through
 /// `mpOnMainSync`.
+///
+/// A route, clear or marker update that arrives while the map's style is not loaded cannot be written to the style
+/// yet. `isStyleLoaded` is false while a style loads and also, briefly, while one of its sources loads. The request
+/// waits in `pendingRequest` and is applied when the style is loaded again; only the latest one counts.
 @MainActor
 final class MBRouteRenderer: MPRouteRenderer {
     private weak var mapView: MapView?
+
+    /// The latest route request not yet written to the style; see `submit`. `nil` when nothing is waiting.
+    private var pendingRequest: PendingRequest?
+    private var styleLoadedToken: AnyCancelable?
+    private var sourceLoadedToken: AnyCancelable?
+
+    private enum PendingRequest {
+        case route(RouteSnapshot, RouteStyle, animate: Bool, duration: TimeInterval)
+        case clear
+        case markers(RouteSnapshot)
+    }
 
     // SAFETY: a non-isolated protocol requirement on a main-actor class. Written by the directions renderer and
     // read by the provider's tap handler, both on the main thread, as before this class was isolated;
@@ -65,6 +80,15 @@ final class MBRouteRenderer: MPRouteRenderer {
         self.mapView = mapView
         configureSources()
         self.mapView?.mapboxMap.addMapsIndoorsLayers()
+        // A waiting request is retried when a style finishes loading and when a source does: a source that was
+        // loading on a loaded style turns `isStyleLoaded` back to true with no new `onStyleLoaded`. Mapbox delivers
+        // both on the main thread; `MapBoxProvider` observes `onStyleLoaded` the same way.
+        styleLoadedToken = mapView?.mapboxMap.onStyleLoaded.observe { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyPendingRequest() }
+        }
+        sourceLoadedToken = mapView?.mapboxMap.onSourceDataLoaded.observe { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyPendingRequest() }
+        }
     }
 
     // MARK: - Values that cross the hop
@@ -139,6 +163,18 @@ final class MBRouteRenderer: MPRouteRenderer {
             end = model.end
             stops = model.stops ?? []
         }
+
+        private init(polyline: [CLLocationCoordinate2D], start: (any MPViewModel)?, end: (any MPViewModel)?, stops: [any MPViewModel]) {
+            self.polyline = polyline
+            self.start = start
+            self.end = end
+            self.stops = stops
+        }
+
+        /// This route's line with `other`'s markers, which is what `applyMarkers` does to a drawn route.
+        func withMarkers(of other: RouteSnapshot) -> RouteSnapshot {
+            RouteSnapshot(polyline: polyline, start: other.start, end: other.end, stops: other.stops)
+        }
     }
 
     func configureSources() {
@@ -190,17 +226,20 @@ final class MBRouteRenderer: MPRouteRenderer {
     }
 
     private func applyOnMain(snapshot: RouteSnapshot, style: RouteStyle, animate: Bool, duration: TimeInterval) {
-        // Cancel any in-flight animator AND stop the continuous-render loop before the style guard, so if this
-        // apply bails (style not loaded) neither keeps running against a stale/absent style. The animate branch
-        // below re-arms the render loop; a non-animate apply leaves it stopped so the map idles.
+        // Cancel any in-flight animator AND stop the continuous-render loop before submitting, so if the style is
+        // still loading neither keeps running against a stale/absent style. The animate branch of
+        // `drawRoute` re-arms the render loop; a non-animate draw leaves it stopped so the map idles.
         valueAnimator?.invalidate()
         valueAnimator = nil
         stopRenderLoop()
-        // Supersede the previous animation: ticks captured under an older generation bail (below).
+        // Supersede the previous animation: ticks captured under an older generation bail (in `drawRoute`).
         animationGeneration += 1
-        let generation = animationGeneration
-        guard let mapView, mapView.mapboxMap.isStyleLoaded else { return }
+        submit(.route(snapshot, style, animate: animate, duration: duration))
+    }
 
+    /// Writes the route to a loaded style: the body of `apply`, also run for a route that waited for the style.
+    private func drawRoute(snapshot: RouteSnapshot, style: RouteStyle, animate: Bool, duration: TimeInterval, on mapView: MapView) {
+        let generation = animationGeneration
         configureSources()
 
         route = snapshot.polyline
@@ -496,19 +535,50 @@ final class MBRouteRenderer: MPRouteRenderer {
 
     /// Re-commits only the route marker source, leaving every line / stamp layer — and the running animator —
     /// alone. The marker source is fully replaced by the new feature collection, so a marker the model no
-    /// longer carries (an endpoint pin whose display rule just went out of its zoom range) disappears.
+    /// longer carries (an endpoint pin whose display rule just went out of its zoom range) disappears. A route
+    /// still waiting for the style takes these markers instead and is drawn with them (see `submit`).
     nonisolated func applyMarkers(model: RouteViewModelProducer) {
         let snapshot = RouteSnapshot(model)
         Task { @MainActor [weak self] in
-            guard let self, let mapView = self.mapView, mapView.mapboxMap.isStyleLoaded else { return }
-            self.commitMarkers(snapshot: snapshot, on: mapView)
+            self?.submit(.markers(snapshot))
+        }
+    }
+
+    /// Makes `request` the latest one and writes it at once if the style is loaded; otherwise it waits for a style or
+    /// source to finish loading. Only the latest request counts: a route or clear replaces whatever is waiting, and a marker
+    /// update joins a waiting route (which keeps its own line) or is dropped after a waiting clear, which removes the
+    /// route those markers belong to.
+    private func submit(_ request: PendingRequest) {
+        switch (request, pendingRequest) {
+        case (.markers(let markers), .route(let waiting, let style, let animate, let duration)):
+            pendingRequest = .route(waiting.withMarkers(of: markers), style, animate: animate, duration: duration)
+        case (.markers, .clear):
+            break
+        default:
+            pendingRequest = request
+        }
+        applyPendingRequest()
+    }
+
+    /// Writes the waiting request to the style, if the style is loaded. Called by `submit` and when a style or source
+    /// finishes loading.
+    private func applyPendingRequest() {
+        guard let request = pendingRequest, let mapView, mapView.mapboxMap.isStyleLoaded else { return }
+        pendingRequest = nil
+        switch request {
+        case .route(let snapshot, let style, let animate, let duration):
+            drawRoute(snapshot: snapshot, style: style, animate: animate, duration: duration, on: mapView)
+        case .clear:
+            eraseRoute(on: mapView)
+        case .markers(let snapshot):
+            commitMarkers(snapshot: snapshot, on: mapView)
             // Nothing else in this pass wakes the map, and with no animation running there is no render loop
             // to pick the change up — so ask for the one frame that draws the toggled marker.
             mapView.mapboxMap.triggerRepaint()
         }
     }
 
-    /// Registers the marker icons and commits the marker source — the marker slice of `applyOnMain`, extracted
+    /// Registers the marker icons and commits the marker source — the marker slice of `drawRoute`, extracted
     /// for readability.
     private func commitMarkers(snapshot: RouteSnapshot, on mapView: MapView) {
         // Register the marker icons BEFORE committing the marker source. The symbol layer resolves its icon via
@@ -610,7 +680,11 @@ final class MBRouteRenderer: MPRouteRenderer {
         valueAnimator?.invalidate()
         valueAnimator = nil
         stopRenderLoop()
-        guard let mapView, mapView.mapboxMap.isStyleLoaded else { return }
+        submit(.clear)
+    }
+
+    /// Removes the route from a loaded style: the body of `clear`, also run for a clear that waited for the style.
+    private func eraseRoute(on mapView: MapView) {
         do {
             // Clear polyline
             let geom = LineString([]).geometry

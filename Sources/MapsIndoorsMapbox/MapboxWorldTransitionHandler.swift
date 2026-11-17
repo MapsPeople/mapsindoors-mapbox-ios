@@ -30,6 +30,13 @@ class MapboxWorldTransitionHandler {
     /// existed only in an experimental basemap and had no effect offline, and the `show3dObjects`
     /// fallback, which also hid landmark models and trees.
     private let colorBuildings = "colorBuildings"
+    /// Standard's toggle for its 3D landmark models (the textured towers in large cities). They are
+    /// not buildings to `colorBuildings`, so the fade leaves them solid, and the clip layer removes
+    /// 3D content only inside the venue outlines. A landmark next to a venue then stands at full
+    /// height in front of the floor plan under a pitched camera, covering the POIs that are drawn on
+    /// it (JPMC 712 Main, SPEX-3206). Models cannot be faded, only shown or hidden;
+    /// ``landmarkPolicy`` decides which for each world state.
+    private let show3dLandmarks = "show3dLandmarks"
 
     /// The style's own `colorBuildings`, read before the first write after each style load. The fade
     /// writes this colour back with only its alpha scaled, so a building colour set by a host style
@@ -59,7 +66,39 @@ class MapboxWorldTransitionHandler {
     /// apply; log that once, not per camera change.
     private var didLogBuildingFadeFailure = false
 
+    /// A style without `show3dLandmarks` (a host style that is not Standard) rejects the write on
+    /// every apply; log that once per style load.
+    private var didLogLandmarkToggleFailure = false
+
+    /// The style's own `show3dLandmarks`: the last value read from the map that this handler did not
+    /// write. Landmarks a host style ships switched off, or a host switches off while this handler
+    /// shows them, are not switched on. `true` (Standard's default) until a value has been read.
+    ///
+    /// Limit: a value equal to this handler's last write cannot be told apart from that write. A host
+    /// that switches landmarks off while this handler already hides them (the camera is indoors, the
+    /// usual state of a MapsIndoors app) is therefore not seen, and the landmarks are shown again at
+    /// city zoom. The same holds for a style loaded in that state with its landmarks off.
+    private var styleShowsLandmarks = true
+
+    /// The value last written, to tell this handler's own write from the style's value when it is read
+    /// back. Kept across style loads on purpose: a pass can write between Mapbox resetting the import
+    /// config and ``resetBuildingColorBaseline()``, and a hidden write adopted as the style's own value
+    /// would keep the landmarks hidden for good.
+    private var lastLandmarkWrite: Bool?
+
     weak var map: MapBoxProvider?
+
+    /// Whether the landmarks are drawn for the current building fade, from the solution's
+    /// `MPSettings3D.hideLandmarks` via `MapBoxProvider.hideBaseMapLandmarks`. A change re-applies at once,
+    /// without waiting for the camera to move.
+    var landmarkPolicy: any MBLandmarkVisibilityPolicy = MBHideLandmarksWhileFadedPolicy() {
+        didSet {
+            Task { [weak self] in
+                await self?.configureMapsIndoorsVsMapboxVisibility()
+            }
+        }
+    }
+
     var enableMapboxBuildings = true {
         didSet {
             // Reset cached state so the next call applies the change
@@ -82,6 +121,8 @@ class MapboxWorldTransitionHandler {
     func resetBuildingColorBaseline() {
         buildingColorBaseline = nil
         lastAppliedBuildingOpacity = nil
+        // A new style may accept or reject the landmark toggle differently; log its first failure too.
+        didLogLandmarkToggleFailure = false
     }
 
     /// The building colour to fade: the style's own, captured on first use after a style load.
@@ -125,6 +166,35 @@ class MapboxWorldTransitionHandler {
         } catch {
             logBuildingFadeFailureOnce("'\(colorBuildings)' rejected by the '\(baseMap)' import: \(error)")
             throw error
+        }
+    }
+
+    /// Shows or hides Standard's landmark models as ``landmarkPolicy`` decides for `state`, and never
+    /// shows landmarks the style itself has switched off (``styleShowsLandmarks``).
+    ///
+    /// Checked against the map on every pass rather than a cache of what was written, so a style load or a
+    /// late `basemap` import that resets the config is corrected on the next pass, and a policy change needs
+    /// no cache to be cleared. Written after the building fade and never rethrown: a style without the key
+    /// (a host style that is not Standard) must not undo a fade that is already applied and cached.
+    private func applyLandmarkVisibility(for state: WorldState, on map: MBStyleImportConfigSetting) {
+        let held = (try? map.styleImportConfigValue(for: baseMap, config: show3dLandmarks)) as? Bool
+        if let held, held != lastLandmarkWrite {
+            // Not this handler's write: the style's own value, or one the host has set since.
+            styleShowsLandmarks = held
+            lastLandmarkWrite = nil
+        }
+        let shown =
+            styleShowsLandmarks
+            && landmarkPolicy.showsLandmarks(
+                buildingOpacity: buildingOpacity(for: state), nativeBuildingsEnabled: enableMapboxBuildings)
+        guard held != shown else { return }
+        do {
+            try map.setStyleImportConfigProperty(for: baseMap, config: show3dLandmarks, value: shown)
+            lastLandmarkWrite = shown
+        } catch {
+            guard !didLogLandmarkToggleFailure else { return }
+            didLogLandmarkToggleFailure = true
+            MPLog.mapbox.error("Base-map landmark toggle: '\(show3dLandmarks)' rejected by the '\(baseMap)' import: \(error)")
         }
     }
 
@@ -270,6 +340,10 @@ class MapboxWorldTransitionHandler {
             if enableMapboxBuildings == false {
                 try applyBuildingConfig(opacity: 0.0, on: activeMapboxMap)
             }
+
+            // After the building writes: a pass that throws above (the `basemap` import not ready yet)
+            // retries everything on the next pass, and must not spend the one-time landmark error log.
+            applyLandmarkVisibility(for: newWorldState, on: activeMapboxMap)
         } catch {
             MPLog.mapbox.info("Failed to configure style config properties.")
         }

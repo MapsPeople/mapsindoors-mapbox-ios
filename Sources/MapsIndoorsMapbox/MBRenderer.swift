@@ -544,15 +544,36 @@ class MBRenderer {
         }
     }
 
+    /// A floor plan is shown when its zoom range held the zoom its view model was produced at. A zoom at the same centre
+    /// produces no view model until the camera stops, so the filter also shows a floor plan from the first whole zoom
+    /// level of its range: Mapbox evaluates `zoom` in a filter at whole levels only, and a floor plan's range starts at a
+    /// whole level. A distant tile in a pitched view is drawn at a lower zoom, which can only hide one. Leaving the
+    /// range, a floor plan goes with the next view model, as before.
+    nonisolated static var floorPlanFilter: Exp {
+        Exp(.all) {
+            Exp(.eq) {
+                Exp(.get) { Key.type.rawValue }
+                Exp(.literal) { MPRenderedFeatureType.floorplan.rawValue }
+            }
+            Exp(.any) {
+                Exp(.eq) {
+                    Exp(.get) { Key.floorPlanInRange.rawValue }
+                    true
+                }
+                Exp(.gte) {
+                    Exp(.zoom)
+                    Exp(.get) { Key.floorPlanZoomFrom.rawValue }
+                }
+            }
+        }
+    }
+
     private func configureFloorPlanLayer() throws {
         try map?.updateLayer(withId: Constants.LayerIDs.floorPlanFillLayer, type: FillLayer.self) { layerUpdate in
             layerUpdate.fillColor = .expression(Exp(.get) { Key.floorPlanFillColor.rawValue })
             layerUpdate.fillOpacity = .expression(Exp(.get) { Key.floorPlanFillOpacity.rawValue })
 
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.floorplan.rawValue }
-            }
+            layerUpdate.filter = Self.floorPlanFilter
         }
 
         try map?.updateLayer(withId: Constants.LayerIDs.floorPlanLineLayer, type: LineLayer.self) { layerUpdate in
@@ -561,10 +582,7 @@ class MBRenderer {
             layerUpdate.lineWidth = .expression(Exp(.get) { Key.floorPlanStrokeWidth.rawValue })
             layerUpdate.lineJoin = .constant(.round)
 
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.floorplan.rawValue }
-            }
+            layerUpdate.filter = Self.floorPlanFilter
         }
     }
 
@@ -683,9 +701,37 @@ class MBRenderer {
             layerUpdate.modelRotation = .expression(Exp(.get) { Key.model3DRotation.rawValue })
             layerUpdate.modelType = .constant(.common3d)
 
-            layerUpdate.filter = Exp(.eq) {
-                Exp(.get) { Key.type.rawValue }
-                Exp(.literal) { MPRenderedFeatureType.model3d.rawValue }
+            // A model is shown when its zoom range held the zoom its view model was produced at. A zoom at the same
+            // centre produces no view model until the camera stops, so the filter also shows a model at the whole
+            // zoom levels that lie inside its range. Mapbox evaluates `zoom` in a filter at whole levels only, so a
+            // level counts when all of it, up to the next level, is inside: this part never shows a model outside its
+            // range, it only shows one before the gesture ends. Leaving the range, a model goes with the next view
+            // model, as before. In a pitched view distant tiles are drawn at a lower zoom, so this holds because
+            // `apply3DModel` leaves out a model above its range: below it, a lower zoom can only hide one.
+            layerUpdate.filter = Exp(.all) {
+                Exp(.eq) {
+                    Exp(.get) { Key.type.rawValue }
+                    Exp(.literal) { MPRenderedFeatureType.model3d.rawValue }
+                }
+                Exp(.any) {
+                    Exp(.eq) {
+                        Exp(.get) { Key.model3DInRange.rawValue }
+                        true
+                    }
+                    Exp(.all) {
+                        Exp(.gte) {
+                            Exp(.zoom)
+                            Exp(.get) { Key.model3DZoomFrom.rawValue }
+                        }
+                        Exp(.lte) {
+                            Exp(.zoom)
+                            Exp(.subtract) {
+                                Exp(.get) { Key.model3DZoomTo.rawValue }
+                                1
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -740,7 +786,9 @@ class MBRenderer {
     /// Above that level the base map's buildings are faded, but a fade keeps their geometry, and
     /// any z-elevated symbol over them (the elevated 2D-model layer) is still lifted onto their
     /// rooftops under a pitched camera. Clipping removes the geometry itself (SPEX-1816), as the
-    /// Android SDK does since SPEX-1758.
+    /// Android SDK does since SPEX-1758. It reaches only inside the venue outlines, so a landmark
+    /// model next to a venue is untouched; those are hidden through `show3dLandmarks` by
+    /// `MapboxWorldTransitionHandler` (SPEX-3206).
     ///
     /// The transition level is in Mapbox zoom, the same unit as a layer's `minzoom`.
     nonisolated static func clipLayerMinZoom(isClipLayerModuleEnabled: Bool, transitionLevel: Int) -> Double {
@@ -1338,7 +1386,8 @@ extension MPViewModel {
         }
         if let markerGeometryArea = marker.properties[.markerGeometryArea] as? Double { feature.properties?[Key.markerGeometryArea.rawValue] = JSONValue(markerGeometryArea) }
         if let markerIconScale = marker.properties[.markerIconScale] as? Double { feature.properties?[Key.markerIconScale.rawValue] = JSONValue(markerIconScale) }
-        if let labelMaxWidth = marker.properties[.labelMaxWidth] as? UInt { feature.properties?[Key.labelMaxWidth.rawValue] = JSONValue(Int(labelMaxWidth)) }
+        // Double, not Int: the default rule's UInt.max ("no limit") overflows Int.
+        if let labelMaxWidth = marker.properties[.labelMaxWidth] as? UInt { feature.properties?[Key.labelMaxWidth.rawValue] = JSONValue(Double(labelMaxWidth)) }
         if let labelSize = marker.properties[.labelSize] as? Int { feature.properties?[Key.labelSize.rawValue] = JSONValue(labelSize) }
         if let labelColor = marker.properties[.labelColor] as? String { feature.properties?[Key.labelColor.rawValue] = JSONValue(labelColor) }
         if let labelOpacity = marker.properties[.labelOpacity] as? Double { feature.properties?[Key.labelOpacity.rawValue] = JSONValue(labelOpacity) }
@@ -1384,7 +1433,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var floorPlanFeature: Feature? {
+    var floorPlanFeature: Feature? {
         guard let floorPlan = floorPlanExtrusion else { return nil }
 
         var feature = Feature(geometry: floorPlan.geometry.featureGeometry())
@@ -1397,6 +1446,11 @@ extension MPViewModel {
         if let floorPlanStrokeOpacity = floorPlan.properties[.floorPlanStrokeOpacity] as? Double { feature.properties?[Key.floorPlanStrokeOpacity.rawValue] = JSONValue(floorPlanStrokeOpacity) }
         if let floorPlanStrokeWidth = floorPlan.properties[.floorPlanStrokeWidth] as? Double { feature.properties?[Key.floorPlanStrokeWidth.rawValue] = JSONValue(floorPlanStrokeWidth) }
         if let floorPlanType = (floorPlan.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(floorPlanType) }
+        if let inRange = floorPlan.properties[.floorPlanInRange] as? Bool { feature.properties?[Key.floorPlanInRange.rawValue] = JSONValue(inRange) }
+        // In engine zoom, which the floor plan layers' filter compares it with.
+        if let zoomFrom = floorPlan.properties[.floorPlanZoomFrom] as? Double {
+            feature.properties?[Key.floorPlanZoomFrom.rawValue] = JSONValue(MBRenderer.engineZoom(mapsIndoorsZoom: zoomFrom))
+        }
 
         return feature
     }
@@ -1464,7 +1518,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var model3DFeature: Feature? {
+    var model3DFeature: Feature? {
         guard let model3D else { return nil }
 
         var feature = Feature(geometry: model3D.geometry.featureGeometry())
@@ -1480,6 +1534,14 @@ extension MPViewModel {
         }
         if let model3DType = (model3D.properties[.type] as? MPRenderedFeatureType)?.rawValue { feature.properties?[Key.type.rawValue] = JSONValue(model3DType) }
         if let clickable = model3D.properties[.clickable] as? Bool { feature.properties?[Key.clickable.rawValue] = JSONValue(clickable) }
+        if let inRange = model3D.properties[.model3DInRange] as? Bool { feature.properties?[Key.model3DInRange.rawValue] = JSONValue(inRange) }
+        // In engine zoom, which the model layer's filter compares them with.
+        if let zoomFrom = model3D.properties[.model3DZoomFrom] as? Double {
+            feature.properties?[Key.model3DZoomFrom.rawValue] = JSONValue(MBRenderer.engineZoom(mapsIndoorsZoom: zoomFrom))
+        }
+        if let zoomTo = model3D.properties[.model3DZoomTo] as? Double {
+            feature.properties?[Key.model3DZoomTo.rawValue] = JSONValue(MBRenderer.engineZoom(mapsIndoorsZoom: zoomTo))
+        }
 
         return feature
     }

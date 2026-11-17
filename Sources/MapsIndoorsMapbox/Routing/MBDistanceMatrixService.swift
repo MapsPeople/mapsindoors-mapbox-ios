@@ -150,8 +150,9 @@ extension MapboxDistanceMatrix {
                 var mpRow = MPDistanceMatrixRows()
                 mpRow.elements = [MPDistanceMatrixElements]()
                 for j in originsCount..<(originsCount + destinations) {
-                    let distance = distanceMatrix[j][i]
-                    let duration = durationMatrix[j][i]
+                    // The response's row is the coordinate the trip starts from: origin i to destination j.
+                    let distance = distanceMatrix[i][j]
+                    let duration = durationMatrix[i][j]
 
                     let mpDist = MPRoutePropertyInternal(withValue: NSNumber(value: distance), withText: Measurement(value: distance, unit: UnitLength.meters).converted(to: UnitLength.kilometers).description)
 

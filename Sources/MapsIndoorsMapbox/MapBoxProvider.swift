@@ -50,7 +50,7 @@ extension MapboxMap: MBStyleLoading {
 // keep the convention. Nothing enforces that — `MPMapConfig.mapProvider` is public, so a host can
 // reach this object off-main — so anything added here should say which of the two groups it
 // belongs to rather than assuming the convention holds.
-public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
+public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked Sendable {
     public let model2DResolutionLimit = 500
     public let providerName = "mapbox"
 
@@ -60,6 +60,19 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
             let value = enableNativeMapBuildings
             Task { @MainActor [weak self] in
                 self?.mapboxTransitionHandler?.enableMapboxBuildings = value
+            }
+        }
+    }
+
+    /// Whether Standard's 3D landmark models leave with the building fade (SPEX-3206). Forwarded from the
+    /// solution's `MPSettings3D.hideLandmarks` on every render. Main-actor group: written only by
+    /// `MPMapControlInternal`, like `enableNativeMapBuildings`, so it is not lock-backed.
+    public var hideBaseMapLandmarks: Bool = true {
+        didSet {
+            guard oldValue != hideBaseMapLandmarks else { return }
+            let policy = MBLandmarkVisibility.policy(hidingLandmarks: hideBaseMapLandmarks)
+            Task { @MainActor [weak self] in
+                self?.mapboxTransitionHandler?.landmarkPolicy = policy
             }
         }
     }
@@ -485,8 +498,9 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         // `onStyleLoaded` event may have already fired — `Signal.observe`
         // does not replay past events. Apply once synchronously so the
         // Mapbox logo is suppressed even when no further style load is
-        // scheduled (SPEX-1786).
-        MainActor.assumeIsolated {
+        // scheduled (SPEX-1786). Main-actor state, so the same fast path /
+        // logged hop as the blocks above.
+        mpOnMainSync("MapBoxProvider.init.ornaments") { [self] in
             adjustOrnaments()
             // Same reason, for the same observer: the map may already be on a style by now, and
             // `lastLoadedStyleURI` would otherwise stay nil until the *next* load - which for a
@@ -499,7 +513,9 @@ public class MapBoxProvider: MPMapProvider, @unchecked Sendable {
         // view knows not to reveal a map that is still showing the engine's own style and is about to be
         // blanked by the replacement below. Paired with `styleLoadDidFinish` at the end of
         // `_loadMapbox()`; the coordinator reveals regardless if that never arrives.
-        MainActor.assumeIsolated { MPInitialViewCameraCoordinator.styleLoadWillBegin(self) }
+        mpOnMainSync("MapBoxProvider.init.styleLoadWillBegin") { [self] in
+            MPInitialViewCameraCoordinator.styleLoadWillBegin(self)
+        }
 
         Task { [weak self] in
             await self?.verifySetup()
