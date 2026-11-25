@@ -5,7 +5,7 @@
 
 ## Description
 
-This repository contains the Swift package for the [MapsIndoors with Mapbox Maps SDK for iOS](https://docs.mapsindoors.com/sdks-and-frameworks/ios/getting-started). For additional methods of installing the MapsIndoors SDK for iOS including CocoaPods, see the MapsIndoors SDK for iOS [documentation](https://docs.mapsindoors.com/sdks-and-frameworks/ios/getting-started/create-a-new-project).
+This repository contains the Swift package for the [MapsIndoors with Mapbox Maps SDK for iOS](https://docs.mapsindoors.com/sdks-and-frameworks/ios/getting-started). The SDK is also available as XCFrameworks; see the MapsIndoors SDK for iOS [documentation](https://docs.mapsindoors.com/sdks-and-frameworks/ios/getting-started/create-a-new-project).
 
 
 ## Requirements
@@ -28,7 +28,7 @@ This repository contains the Swift package for the [MapsIndoors with Mapbox Maps
 
 Documentation for the MapsIndoors SDK for iOS is available as [guides](https://docs.mapsindoors.com/sdks-and-frameworks/ios/getting-started) and [reference documentation](https://docs.mapsindoors.com/reference-docs/ios-sdk).
 
-You can keep up with new features, changes and fixes via the [change log](https://docs.mapsindoors.com/other-docs/changelog/ios-sdk/v4).
+You can keep up with new features, changes and fixes via the [change log](https://docs.mapsindoors.com/other/changelog/ios-sdk/v4).
 
 
 ## License
