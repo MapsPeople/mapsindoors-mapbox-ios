@@ -125,9 +125,10 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
                         return
                     }
                     let cancel = self.tileStore.loadTileRegion(forId: id, loadOptions: loadOptions) { result in
-                        switch result {
-                        case .success: continuation.resume()
-                        case .failure(let error): continuation.resume(throwing: error)
+                        if let error = Self.tileRegionLoadFailure(result.map { _ in () }) {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume()
                         }
                     }
                     cancelable.set(cancel)
@@ -448,6 +449,21 @@ final class MBBaseMapCacheProvider: MapProviderBaseMapCache, @unchecked Sendable
         let lo = UInt8(min(max(minZoom, 0), 22).rounded(.down))
         let hi = UInt8(min(max(maxZoom, 0), 22).rounded(.up))
         return lo...(max(lo, hi))
+    }
+
+    /// The error a tile region load ends with, or nil when the region counts as loaded.
+    ///
+    /// From MapboxMaps 11.32, a load that leaves some of the region's resources missing fails with
+    /// `TileRegionError.partialLoad`, where it used to succeed. The region is usable, and the next load
+    /// only fetches what is still missing, so it counts as loaded, as it did before. Thrown, it would stop
+    /// the base map sync at this region and leave the remaining regions unsynced.
+    static func tileRegionLoadFailure(_ result: Result<Void, Error>) -> Error? {
+        guard case .failure(let error) = result else { return nil }
+        if case .partialLoad(let reason)? = error as? TileRegionError {
+            MPLog.mapbox.info("Tile region loaded with some resources missing; the next sync loads them: \(reason)")
+            return nil
+        }
+        return error
     }
 
     /// The tileset descriptors whose tile packs must be cached for the base map to render

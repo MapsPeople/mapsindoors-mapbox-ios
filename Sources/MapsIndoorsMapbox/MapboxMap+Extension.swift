@@ -91,7 +91,7 @@ extension MapboxMap {
 
         var clipLayer = ClipLayer(id: Constants.LayerIDs.clippingLayer, source: Constants.SourceIDs.clippingSource)
         clipLayer.clipLayerTypes = .constant([.model])
-        clipLayer.clipLayerScope = .constant(["basemap"])
+        clipLayer.clipLayerScope = .constant([MBBaseMapStyleContract.current.importId])
 
         // Sorted (first is bottom-most layer)
         let layersInAscendingOrder =
@@ -164,5 +164,26 @@ extension MapboxMap {
                 lastLayerIdBySlot[slotKey] = layer.id
             }
         }
+    }
+}
+
+extension MapboxMap {
+    /// The camera that fits `coordinates` into the view less `padding`, centred there, with `padding` on the camera.
+    ///
+    /// Mapbox treats the two paddings of `camera(for:camera:coordinatesPadding:maxZoom:offset:)` differently: the
+    /// camera's padding is the map's padding, while the coordinates padding only grows the box being fitted. A nil
+    /// camera padding means the padding the camera already has, so a fit would depend on whatever the previous move
+    /// left behind, and padding both counts it twice: uneven padding then pushes the fit off-centre and into the
+    /// padding (SPEX-3129). So the padding goes on the camera only, and stays on the result so the fit is drawn
+    /// against the same padded view it was worked out for.
+    func camera(
+        fitting coordinates: [CLLocationCoordinate2D], padding: UIEdgeInsets, bearing: CLLocationDirection?,
+        pitch: CGFloat?
+    ) throws -> CameraOptions {
+        var camera = try camera(
+            for: coordinates, camera: CameraOptions(padding: padding, bearing: bearing, pitch: pitch),
+            coordinatesPadding: .zero, maxZoom: nil, offset: nil)
+        camera.padding = padding
+        return camera
     }
 }

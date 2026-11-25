@@ -19,24 +19,20 @@ extension MapboxMap: MBStyleImportConfigSetting {
 
 @MainActor
 class MapboxWorldTransitionHandler {
-    private let baseMap = "basemap"
-    private let placeLabels = "showPlaceLabels"
-    private let transitLabels = "showTransitLabels"
-    private let roadLabels = "showRoadLabels"
-    private let poiLabels = "showPointOfInterestLabels"
-    /// Mapbox Standard's building colour config ("Set a custom color for 3D & 2D buildings"). The sole
-    /// mechanism for fading base-map buildings across the transition band (SPEX-2517): Standard derives
-    /// building opacity from its alpha, online and offline alike. It replaces `buildingsOpacity`, which
-    /// existed only in an experimental basemap and had no effect offline, and the `show3dObjects`
-    /// fallback, which also hid landmark models and trees.
-    private let colorBuildings = "colorBuildings"
-    /// Standard's toggle for its 3D landmark models (the textured towers in large cities). They are
-    /// not buildings to `colorBuildings`, so the fade leaves them solid, and the clip layer removes
-    /// 3D content only inside the venue outlines. A landmark next to a venue then stands at full
-    /// height in front of the floor plan under a pitched camera, covering the POIs that are drawn on
-    /// it (JPMC 712 Main, SPEX-3206). Models cannot be faded, only shown or hidden;
-    /// ``landmarkPolicy`` decides which for each world state.
-    private let show3dLandmarks = "show3dLandmarks"
+    // The style options this handler reads and writes are declared in `MBBaseMapStyleContract`, where
+    // each one is documented. No option name is spelled out here, so the contract lists them all.
+    // This is the only file in the provider that may read or write the base-map config (rule M1 of
+    // Scripts/architecture/catch_code_issues.sh).
+    private let baseMap = MBBaseMapStyleContract.current.importId
+    private let placeLabels = MBBaseMapStyleOption.showPlaceLabels.name
+    private let transitLabels = MBBaseMapStyleOption.showTransitLabels.name
+    private let roadLabels = MBBaseMapStyleOption.showRoadLabels.name
+    private let poiLabels = MBBaseMapStyleOption.showPointOfInterestLabels.name
+    /// Fades the base-map buildings across the transition band (SPEX-2517).
+    private let colorBuildings = MBBaseMapStyleOption.colorBuildings.name
+    /// Shows or hides the base map's landmark models (SPEX-3206); ``landmarkPolicy`` decides which
+    /// for each world state.
+    private let show3dLandmarks = MBBaseMapStyleOption.show3dLandmarks.name
 
     /// The style's own `colorBuildings`, read before the first write after each style load. The fade
     /// writes this colour back with only its alpha scaled, so a building colour set by a host style
@@ -66,8 +62,10 @@ class MapboxWorldTransitionHandler {
     /// apply; log that once, not per camera change.
     private var didLogBuildingFadeFailure = false
 
-    /// A style without `show3dLandmarks` (a host style that is not Standard) rejects the write on
-    /// every apply; log that once per style load.
+    /// The engine refuses the `show3dLandmarks` write only when the style has no `basemap` import. A style
+    /// with the import but without the option (a host style that is not Standard) accepts the write without
+    /// an error (`MBStyleEngineBehaviourTests`: `missingImportThrows`, `unknownOptionIsAccepted`). Should a
+    /// write be refused, log that once per style load.
     private var didLogLandmarkToggleFailure = false
 
     /// The style's own `show3dLandmarks`: the last value read from the map that this handler did not
@@ -174,8 +172,9 @@ class MapboxWorldTransitionHandler {
     ///
     /// Checked against the map on every pass rather than a cache of what was written, so a style load or a
     /// late `basemap` import that resets the config is corrected on the next pass, and a policy change needs
-    /// no cache to be cleared. Written after the building fade and never rethrown: a style without the key
-    /// (a host style that is not Standard) must not undo a fade that is already applied and cached.
+    /// no cache to be cleared. Written after the building fade and never rethrown, so a refused write cannot
+    /// undo a fade that is already applied and cached. A style without the key accepts the write; only a
+    /// missing `basemap` import refuses it, and that fails the label and fade writes before this one.
     private func applyLandmarkVisibility(for state: WorldState, on map: MBStyleImportConfigSetting) {
         let held = (try? map.styleImportConfigValue(for: baseMap, config: show3dLandmarks)) as? Bool
         if let held, held != lastLandmarkWrite {
@@ -298,7 +297,7 @@ class MapboxWorldTransitionHandler {
                 lastAppliedMarkerConfig = currentMarkerConfig
             }
 
-            let currentZoom = Double(map.cameraOperator.position.zoom - 1)
+            let currentZoom = MBZoom.mapbox(fromMapsIndoors: Double(map.cameraOperator.position.zoom))
             let transition = Double(map.transitionLevel)
 
             let newWorldState: WorldState

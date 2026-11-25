@@ -294,6 +294,126 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
         }
     }
 
+    /// The gesture settings the map view had before ``cameraLimits`` was first applied, restored when it
+    /// is cleared. Captured once per stretch of active limits, so re-assigning limits keeps the original
+    /// baseline.
+    ///
+    /// The whole snapshot is written back, so a change the app makes to one of these settings while
+    /// limits are active does not survive clearing them.
+    private struct GestureBaseline {
+        let rotateEnabled: Bool
+        let pitchEnabled: Bool
+        let compassVisibility: OrnamentVisibility
+
+        @MainActor init(capturing mapView: MapView) {
+            rotateEnabled = mapView.gestures.options.rotateEnabled
+            pitchEnabled = mapView.gestures.options.pitchEnabled
+            compassVisibility = mapView.ornaments.options.compass.visibility
+        }
+
+        @MainActor func restore(on mapView: MapView) {
+            mapView.gestures.options.rotateEnabled = rotateEnabled
+            mapView.gestures.options.pitchEnabled = pitchEnabled
+            mapView.ornaments.options.compass.visibility = compassVisibility
+        }
+    }
+
+    private var gestureBaseline: GestureBaseline?
+
+    /// The map's own camera bounds before the SDK first narrowed them, on the Mapbox zoom scale. Kept for
+    /// the lifetime of the provider, since both the licensed zoom cap and ``cameraLimits`` are expressed
+    /// relative to it.
+    private var cameraBoundsBaseline: CameraBounds?
+
+    /// The highest zoom the solution's modules license (see ``MPLicensedZoom``), converted to the Mapbox
+    /// zoom scale. `nil` until a solution has been loaded.
+    private var licensedMaxZoom: CGFloat?
+
+    private var isReapplyingFixedBearing = false
+
+    public var cameraLimits: MPCameraLimits? {
+        // Set from `MPMapControlInternal` on the main actor; the setter's signature carries no
+        // isolation, so assert before touching the map view.
+        didSet { MainActor.assumeIsolated { applyCameraLimits() } }
+    }
+
+    /// Mapbox clamps every camera change, gestures and code alike, to its camera bounds, so the zoom
+    /// range, the bounds and a fixed tilt (as an equal min and max pitch) all go there. Mapbox has no
+    /// bearing bound, so a fixed bearing is held by disabling rotation and by the correction in
+    /// ``reapplyFixedCameraAngles()`` once a move made in code has ended.
+    @MainActor
+    private func applyCameraLimits() {
+        // The route camera fits for a fixed bearing and tilt rather than turning to them afterwards.
+        _routeRenderer?.cameraLimits = cameraLimits
+        guard let mapView else { return }
+
+        guard let limits = cameraLimits else {
+            gestureBaseline?.restore(on: mapView)
+            gestureBaseline = nil
+            applyCameraBounds()
+            return
+        }
+
+        let baseline = gestureBaseline ?? GestureBaseline(capturing: mapView)
+        gestureBaseline = baseline
+
+        applyCameraBounds()
+
+        let holdsBearing = limits.fixedBearingDegrees != nil
+        mapView.gestures.options.rotateEnabled = holdsBearing ? false : baseline.rotateEnabled
+        mapView.gestures.options.pitchEnabled = limits.holdsFixedTilt ? false : baseline.pitchEnabled
+        // The compass turns the map back to north on a tap, which rotation being disabled does not
+        // prevent, so it has to go while a bearing is held.
+        mapView.ornaments.options.compass.visibility = holdsBearing ? .hidden : baseline.compassVisibility
+
+        reapplyFixedCameraAngles()
+    }
+
+    /// The single writer of the map's camera bounds, so the licensed zoom cap and ``cameraLimits`` cannot
+    /// overwrite one another. Every field is passed explicitly, since `setCameraBounds` leaves a `nil`
+    /// field as it is rather than resetting it.
+    @MainActor
+    private func applyCameraBounds() {
+        guard let mapView else { return }
+
+        let baseline = cameraBoundsBaseline ?? mapView.mapboxMap.cameraBounds
+        cameraBoundsBaseline = baseline
+
+        let resolved = MBCameraBoundsResolution.resolve(
+            baselineMinZoom: baseline.minZoom,
+            baselineMaxZoom: baseline.maxZoom,
+            baselineMinPitch: baseline.minPitch,
+            baselineMaxPitch: baseline.maxPitch,
+            licensedMaxZoom: licensedMaxZoom,
+            limits: cameraLimits)
+        let bounds = cameraLimits?.orderedBounds.map { CoordinateBounds(southwest: $0.southWest, northeast: $0.northEast) } ?? baseline.bounds
+
+        let options = CameraBoundsOptions(bounds: bounds, maxZoom: resolved.maxZoom, minZoom: resolved.minZoom, maxPitch: resolved.maxPitch, minPitch: resolved.minPitch)
+        do {
+            try mapView.mapboxMap.setCameraBounds(with: options)
+        } catch {
+            MPLog.mapbox.error("Mapbox rejected the camera bounds \(options): \(error)")
+        }
+    }
+
+    /// Turns the camera back to a fixed bearing after something moved it off it.
+    ///
+    /// Mapbox has no bearing bound, and the SDK's own route camera sets a bearing from
+    /// ``MPDirectionsRenderer/fitMode``, so disabling rotation is not enough on its own. Correcting once
+    /// the camera is idle covers every source of such a move at one point, at the cost of the camera
+    /// visibly turning back after one that changed the bearing. A fixed tilt needs no correction, since
+    /// the camera bounds already hold the pitch.
+    @MainActor
+    func reapplyFixedCameraAngles() {
+        guard let mapView, !isReapplyingFixedBearing,
+            let bearing = cameraLimits?.bearingCorrection(from: mapView.mapboxMap.cameraState.bearing)
+        else { return }
+
+        isReapplyingFixedBearing = true
+        defer { isReapplyingFixedBearing = false }
+        mapView.mapboxMap.setCamera(to: CameraOptions(bearing: bearing))
+    }
+
     public var mpAccessibilityElementsHidden: Bool = false
 
     public weak var delegate: MPMapProviderDelegate? {
@@ -368,7 +488,12 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
 
     public var routeRenderer: MPRouteRenderer {
         // The fallback renderer registers sources on the map, which is main-actor state; see `mpOnMainSync`.
-        _routeRenderer ?? mpOnMainSync("MapBoxProvider.routeRenderer") { MBRouteRenderer(mapView: mapView) }
+        _routeRenderer
+            ?? mpOnMainSync("MapBoxProvider.routeRenderer") {
+                let renderer = MBRouteRenderer(mapView: mapView)
+                renderer.cameraLimits = cameraLimits
+                return renderer
+            }
     }
 
     /// Invalidates the renderer's internal model cache.
@@ -603,6 +728,13 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
     private var cameraIdleCancellable: AnyCancelable? = nil
     private var _cameraDebounceTask: Task<Void, Never>?
 
+    /// The latest debounced camera-change task, finished or not; `nil` before the first camera change.
+    ///
+    /// Test seam (SPEX-2815): its last step re-applies the MapsIndoors-vs-Mapbox visibility, so a test that
+    /// counts re-applies awaits it instead of sleeping past the 150 ms debounce. Main thread only, like the
+    /// camera observer that sets it.
+    var cameraDebounceTask: Task<Void, Never>? { _cameraDebounceTask }
+
     @MainActor
     private func verifySetup() async {
         await loadMapbox()
@@ -742,6 +874,7 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
         renderer?.cleanup()
         renderer = MBRenderer(mapView: mapView, provider: self)
         _routeRenderer = MBRouteRenderer(mapView: mapView)
+        _routeRenderer?.cameraLimits = cameraLimits
 
         // Remove any previously added tap recognizer to prevent duplicates on reload
         if let existing = tapGestureRecognizer {
@@ -770,7 +903,12 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
             }
         }
         cameraIdleCancellable = mapView?.mapboxMap.onMapIdle.observe { [weak self] _ in
+            // Before the debounce below: every idle may settle a render, not only the ones forwarded on.
+            MPRenderSignposts.providerDidSettle()
             guard let self else { return }
+            // Whatever just moved the camera may have turned it off a bearing that
+            // `MPMapControl.cameraLimits` fixes, so put it back now that the move has ended.
+            MainActor.assumeIsolated { self.reapplyFixedCameraAngles() }
             if self.latestIdleTime.timeIntervalSinceNow < -0.5 {
                 self.latestIdleTime = Date.now
                 // Delivered through a detached task that then hops to the main-actor delegate, as it was before
@@ -921,8 +1059,35 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
     struct TapCandidate {
         let id: String?
         let isMarker: Bool
+        /// Whether the tap hit a symbol that draws the location's icon; see `hitsIconSymbol(_:layers:)`.
+        /// Defaults to that, the case the direct-hit bound was made for.
+        var hitsIconSymbol = true
         let clickable: Bool
         let screenDistance: CGFloat
+    }
+
+    /// Whether a marker feature draws an icon. Without one, its label is centred on its coordinate
+    /// and is all that is drawn of the location, so a tap anywhere on that label is a direct hit.
+    ///
+    /// Read from the `hasImage` property the marker layer draws the icon from. A feature without the
+    /// property counts as having an icon, which keeps the bound where nothing says otherwise.
+    static func drawsIcon(_ feature: Feature) -> Bool {
+        feature.properties?[Key.hasImage.rawValue] != JSONValue(booleanLiteral: false)
+    }
+
+    /// The layers that draw a marker's icon. A floating label is drawn in the same symbol.
+    static let iconSymbolLayers: Set<String> = [Constants.LayerIDs.markerLayer, Constants.LayerIDs.markerNoCollisionLayer]
+
+    /// Whether a hit is on a symbol that draws the location's icon: a marker layer's symbol, for a marker
+    /// whose icon is drawn. Only there can a label be part of the icon's symbol, so only there is a tap
+    /// far from the coordinate on text beside the icon.
+    ///
+    /// A flat label is a symbol of its own in `flatLabelsLayer`, centred on the coordinate, icon or not; a
+    /// marker without an icon draws its label alone. A tap anywhere on either is a direct hit.
+    /// `layers` is every layer the hit was drawn in, so a tap on an icon that overlaps its flat label
+    /// still counts as a tap on the icon.
+    static func hitsIconSymbol(_ feature: Feature, layers: [String]) -> Bool {
+        drawsIcon(feature) && layers.contains(where: iconSymbolLayers.contains)
     }
 
     /// How far a marker may sit from its own coordinate and still count as a direct hit, when the
@@ -965,6 +1130,12 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
     ///   room or a model that form *is* the location and the distance means nothing. Only a marker
     ///   is ambiguous, because its icon and label are one symbol.
     ///
+    ///   And only hits on a symbol that draws the icon. Without an icon, the label is centred on the
+    ///   coordinate and is the location's only drawn form, the same case as a room. Bounding it lost
+    ///   taps on the ends of a long label: 55-60pt out on Temple Square's "FamilySearch Library". A
+    ///   flat label is its own symbol, centred on the coordinate, even when the location has an icon.
+    ///   Bounding it lost taps on the ends of a flat label: 55-80pt out at zoom 23.
+    ///
     ///   A discarded marker does not consume the tap — `markers` empties, the pool falls back to
     ///   the non-markers, and the tap selects what is drawn underneath (indoors, usually the room
     ///   the label overhangs). Deliberate: the alternative puts a silent dead zone wherever a label
@@ -979,7 +1150,7 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
     ) -> Int? {
         let eligible = candidates.indices.filter {
             guard candidates[$0].clickable, candidates[$0].id != nil else { return false }
-            guard let cap = maxMarkerDistance, candidates[$0].isMarker else { return true }
+            guard let cap = maxMarkerDistance, candidates[$0].isMarker, candidates[$0].hitsIconSymbol else { return true }
             return candidates[$0].screenDistance <= cap
         }
         let markers = eligible.filter { candidates[$0].isMarker }
@@ -1000,6 +1171,7 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
             return TapCandidate(
                 id: id,
                 isMarker: result.queriedFeature.mpRenderedFeatureType == .marker,
+                hitsIconSymbol: Self.hitsIconSymbol(result.queriedFeature.feature, layers: result.layers),
                 clickable: result.queriedFeature.feature.properties?["clickable"] != JSONValue(booleanLiteral: false),
                 screenDistance: screenDistance(of: result.queriedFeature.feature, to: screenPoint, map: map))
         }
@@ -1132,21 +1304,17 @@ public class MapBoxProvider: MPMapProvider, MPBaseMapLandmarkHiding, @unchecked 
 
     @MainActor
     private func configureMapsIndoorsModuleLicensing(map _: MapboxMap?, renderer: MBRenderer) {
-        do {
-            if let solutionModules = solutionModulesOverride ?? MPMapsIndoors.shared.solution?.modules {
-                if solutionModules.contains("z22") {
-                    try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions(maxZoom: 25))
-                } else {
-                    try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions(maxZoom: 21))
-                }
-                renderer.isWallExtrusionsEnabled = solutionModules.contains("3dwalls")
-                renderer.isFeatureExtrusionsEnabled = solutionModules.contains("3dextrusions")
-                renderer.is2dModelsEnabled = solutionModules.contains("2dmodels")
-                renderer.isFloorPlanEnabled = solutionModules.contains("floorplan")
-            }
-            applyClipLayerZoomRange(on: renderer)
-            try mapView?.mapboxMap.setCameraBounds(with: CameraBoundsOptions())
-        } catch {}
+        if let solutionModules = solutionModulesOverride ?? MPMapsIndoors.shared.solution?.modules {
+            licensedMaxZoom = MPLicensedZoom.maxZoom(modules: solutionModules).map { CGFloat(MBZoom.mapbox(fromMapsIndoors: $0)) }
+            renderer.isWallExtrusionsEnabled = solutionModules.contains("3dwalls")
+            renderer.isFeatureExtrusionsEnabled = solutionModules.contains("3dextrusions")
+            renderer.is2dModelsEnabled = solutionModules.contains("2dmodels")
+            renderer.isFloorPlanEnabled = solutionModules.contains("floorplan")
+        }
+        applyClipLayerZoomRange(on: renderer)
+        // Through the single writer, so re-running this on every render cannot overwrite the zoom
+        // limit the app asked for, and clearing the limits cannot lift the licensed cap.
+        applyCameraBounds()
     }
 
     private func registerLocalFallbackFontWith(filenameString: String, bundleIdentifierString _: String) {

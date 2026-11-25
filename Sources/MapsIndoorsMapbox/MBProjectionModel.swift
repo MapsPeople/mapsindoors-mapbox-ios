@@ -10,8 +10,6 @@ class MBProjectionModel: MPProjection {
         self.view = view
     }
 
-    init() {}
-
     var visibleRegion: MPGeoRegion {
         get async {
             guard let view else { return MPGeoRegion(nearLeft: CLLocationCoordinate2D(), farLeft: CLLocationCoordinate2D(), farRight: CLLocationCoordinate2D(), nearRight: CLLocationCoordinate2D()) }
@@ -36,21 +34,23 @@ class MBProjectionModel: MPProjection {
                 default: 1.0
                 }
 
-            let nearLeftBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: nearLeft, to: center) + 180
-            let nearLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearLeft), to: MPGeoPoint(coordinate: center)) * bufferFactor
-            let nearLeftOffset = MPGeometryUtils.computeOffset(from: nearLeft, dist: nearLeftDistanceToCenter, head: nearLeftBearingToCenter)
-
-            let nearRightBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: nearRight, to: center) + 180
-            let nearRightDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: nearRight), to: MPGeoPoint(coordinate: center)) * bufferFactor
-            let nearRightOffset = MPGeometryUtils.computeOffset(from: nearRight, dist: nearRightDistanceToCenter, head: nearRightBearingToCenter)
-
-            let farLeftBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: farLeft, to: center) + 180
-            let farLeftDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farLeft), to: MPGeoPoint(coordinate: center)) * bufferFactor
-            let farLeftOffset = MPGeometryUtils.computeOffset(from: farLeft, dist: farLeftDistanceToCenter, head: farLeftBearingToCenter)
-
-            let farRightBearingToCenter = MPGeometryUtils.bearingBetweenPoints(from: farRight, to: center) + 180
-            let farRightDistanceToCenter = MPGeometryUtils.distance(from: MPGeoPoint(coordinate: farRight), to: MPGeoPoint(coordinate: center)) * bufferFactor
-            let farRightOffset = MPGeometryUtils.computeOffset(from: farRight, dist: farRightDistanceToCenter, head: farRightBearingToCenter)
+            // Each corner moves out along the line from the centre, to `bufferFactor` times its offset from it. Measured
+            // from the corner, as before, the corner's own distance came on top and every band was one view too big
+            // (SPEX-3132). The offset is scaled in degrees, not through `MPGeometryUtils.distance` and `computeOffset`:
+            // those use different earth radii, so a factor of 1 came back 0.1% inside the view. Over a view at the
+            // zooms that buffer (18 and up) degrees are as good as metres.
+            func buffered(_ corner: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+                var dLng = corner.longitude - center.longitude
+                if dLng > 180 { dLng -= 360 } else if dLng < -180 { dLng += 360 }
+                var longitude = center.longitude + dLng * bufferFactor
+                if longitude > 180 { longitude -= 360 } else if longitude < -180 { longitude += 360 }
+                return CLLocationCoordinate2D(
+                    latitude: center.latitude + (corner.latitude - center.latitude) * bufferFactor, longitude: longitude)
+            }
+            let nearLeftOffset = buffered(nearLeft)
+            let nearRightOffset = buffered(nearRight)
+            let farLeftOffset = buffered(farLeft)
+            let farRightOffset = buffered(farRight)
 
             let bufferedRegion = MPGeoRegion(
                 nearLeft: nearLeftOffset,

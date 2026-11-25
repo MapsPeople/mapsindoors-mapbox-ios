@@ -77,10 +77,14 @@ final class MBPositionPresenter: MPPositionPresenter {
         do {
             try map.updateLayer(withId: layerBlueDotCircle, type: CircleLayer.self) { circleLayer in
                 circleLayer.visibility = .constant(.visible)
+                // The colours carry the display rule's opacity as their alpha, and Mapbox multiplies a colour's
+                // alpha by the layer opacity, so the layer opacity stays 1. It was `1 - alpha`, which drew the
+                // circle at alpha x (1 - alpha), and not at all at full opacity (SPEX-3134). Google draws the
+                // colours as given.
                 circleLayer.circleColor = .constant(StyleColor(circleFillColor))
-                circleLayer.circleOpacity = .constant(1 - circleFillColor.cgColor.alpha)
+                circleLayer.circleOpacity = .constant(1)
                 circleLayer.circleStrokeColor = .constant(StyleColor(circleStrokeColor))
-                circleLayer.circleStrokeOpacity = .constant(1 - circleStrokeColor.cgColor.alpha)
+                circleLayer.circleStrokeOpacity = .constant(1)
                 circleLayer.circleStrokeWidth = .constant(circleStrokeWidth)
                 circleLayer.slot = Self.blueDotSlot
                 circleLayer.circleEmissiveStrength = .constant(1.0)

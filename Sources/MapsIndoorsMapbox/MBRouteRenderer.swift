@@ -57,6 +57,11 @@ final class MBRouteRenderer: MPRouteRenderer {
     // e.g. an old flow tick re-trimming the line right after a live switch to pulse.
     private var animationGeneration = 0
 
+    /// The ids of the marker icons this renderer has put in the style, so a clear or a new set of markers can take
+    /// them out again. Stops are registered under per-leg ids (`stop_<leg>`), so a fixed list of ids missed them
+    /// and every stop icon stayed in the style for the life of the map (SPEX-3130).
+    private var markerImageIDs = Set<String>()
+
     /// Internal (read-only) so tests can check what `apply` and `clear` leave behind.
     private(set) var route = [CLLocationCoordinate2D]()
 
@@ -75,6 +80,10 @@ final class MBRouteRenderer: MPRouteRenderer {
         @unknown default: return (nil, .butt)
         }
     }
+
+    /// `MPMapControl.cameraLimits`, written by the provider whenever they change and when it creates the
+    /// renderer. A fixed bearing or tilt in them is the one the route camera fits for (SPEX-457).
+    var cameraLimits: MPCameraLimits?
 
     required init(mapView: MapView?) {
         self.mapView = mapView
@@ -478,8 +487,8 @@ final class MBRouteRenderer: MPRouteRenderer {
     /// imperative string `setLayerProperty` API rather than the typed `updateLayer` accessors because grounding a
     /// previously-elevated route writes the layer DEFAULT values (line-z-offset `0`, line-elevation-reference
     /// `none`), which `updateLayer` skips — leaving the route stuck elevated; the imperative write always lands.
-    /// (The symbol z-offset / elevation-reference accessors are additionally `@_spi(Experimental)` in this SDK;
-    /// the line accessors are stable public API, but the grounding-reset reason applies to all five layers.)
+    /// (The symbol elevation-reference accessor is additionally `@_spi(Experimental)` in this SDK; the symbol
+    /// z-offset and line accessors are stable public API, but the grounding-reset reason applies to all five layers.)
     /// `try?` mirrors the surrounding stamp / trim writes.
     private func applyElevation(elevated: Bool, height: Double, on mapView: MapView) {
         let values = MBRouteRenderer.elevationLayerValues(elevated: elevated, height: height)
@@ -586,10 +595,12 @@ final class MBRouteRenderer: MPRouteRenderer {
         // renderer does) means that commit finds the image present and draws it at once. Register each
         // independently: a single odd raster makes Mapbox's addImage throw a StyleError, and one aborting throw
         // would suppress every remaining icon (dropping the pins while the labels still draw).
+        var registered = Set<String>()
         for marker in [snapshot.start, snapshot.end].compactMap({ $0 }) + snapshot.stops {
             guard let icon = marker.data[.icon] as? UIImage else { continue }
             do {
                 try mapView.mapboxMap.addImage(icon, id: marker.id, sdf: false)
+                registered.insert(marker.id)
             } catch {
                 MPLog.mapbox.error("Skipping invalid route marker image \(marker.id): \(error)")
             }
@@ -603,6 +614,24 @@ final class MBRouteRenderer: MPRouteRenderer {
             }
         } catch {
             MPLog.mapbox.error("Error updating start/end marker data in route renderer!")
+            // The source still holds the previous markers, so their icons stay, and stay tracked for a clear.
+            markerImageIDs.formUnion(registered)
+            return
+        }
+        // Drop the icons of markers the route no longer has. The source update is only queued at this point, so the
+        // old features may draw once more without their icon.
+        removeMarkerImages(markerImageIDs.subtracting(registered), on: mapView)
+        markerImageIDs = registered
+    }
+
+    /// Removes the given marker icons from the style, each on its own so one failure does not keep the rest.
+    private func removeMarkerImages(_ ids: Set<String>, on mapView: MapView) {
+        for id in ids where mapView.mapboxMap.imageExists(withId: id) {
+            do {
+                try mapView.mapboxMap.removeImage(withId: id)
+            } catch {
+                MPLog.mapbox.error("Could not remove route marker image \(id): \(error)")
+            }
         }
     }
 
@@ -618,44 +647,17 @@ final class MBRouteRenderer: MPRouteRenderer {
         guard let mapView, path.count >= 2 else { return }
 
         let bounds = MPGeoBounds(points: path).adjustedTo(maxZoom: maxZoom, mapViewHeight: Double(mapView.frame.width), mapViewWidth: Double(mapView.frame.width))
-        var bearing = Double.nan
-        var pitch = Double(tilt)
-
-        switch fitMode {
-        case .northAligned:
-            bearing = 0.0
-            pitch = 0.0
-        case .firstStepAligned:
-            guard path.count >= 2 else { break }
-            bearing = MPGeometryUtils.bearingBetweenPoints(from: path[0], to: path[1])
-        case .startToEndAligned:
-            bearing = MPGeometryUtils.bearingBetweenPoints(from: path[0], to: path.last!)
-        case .none:
-            return
-        default:
-            break
-        }
-
-        if !bearing.isNaN {
+        // A fixed bearing or tilt wins over the fit mode's, so the zoom fits the route as it will be seen
+        // rather than being turned to the fixed bearing once it has landed. The camera bounds hold a fixed
+        // tilt as their pitch range, so their maximum is the steepest pitch to fit for.
+        if let (bearing, pitch) = MPRouteCameraFit.angles(
+            fitMode: fitMode, path: path, tilt: Double(tilt), limits: cameraLimits,
+            maxTilt: Double(mapView.mapboxMap.cameraBounds.maxPitch))
+        {
             do {
-                var camOptions = try mapView.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(bearing: bearing, pitch: pitch), coordinatesPadding: padding, maxZoom: nil, offset: nil)
-                // `coordinatesPadding` only feeds the center/zoom
-                // computation — per Mapbox v11 docs it is *not*
-                // applied to the map, and the returned CameraOptions
-                // has `padding == nil`. Without an explicit padding
-                // here, fly(to:) would leave the map's existing
-                // padding intact (e.g. `mapProvider.padding` that
-                // MBCameraOperator's earlier move/animate calls have
-                // persisted on the camera state), so the route would
-                // be fit for (view - combinedPadding) but rendered
-                // against (view - mapPadding) — a mismatch that
-                // leaves an extra safe-area + renderer-padding margin
-                // around the route. Also fixes the tilted-fit-mode
-                // case where perspective stretches the near end
-                // outside the visible region. Setting padding here
-                // is a no-op when pitch is 0 and the existing camera
-                // padding already equals `padding`.
-                camOptions.padding = padding
+                // Pads the camera once, not the route as well (SPEX-3129).
+                let camOptions = try mapView.mapboxMap.camera(
+                    fitting: [bounds.southWest, bounds.northEast], padding: padding, bearing: bearing, pitch: pitch)
                 // `animate` is decided by the directions renderer (host flag plus Reduce Motion, SPEX-2060);
                 // the instant path sets the camera in place rather than flying for zero seconds.
                 if animate {
@@ -700,12 +702,8 @@ final class MBRouteRenderer: MPRouteRenderer {
             if mapView.mapboxMap.sourceExists(withId: Constants.SourceIDs.routeMarkerSource) {
                 mapView.mapboxMap.updateGeoJSONSource(withId: Constants.SourceIDs.routeMarkerSource, geoJSON: features)
             }
-            if mapView.mapboxMap.imageExists(withId: "start_marker") {
-                try mapView.mapboxMap.removeImage(withId: "start_marker")
-            }
-            if mapView.mapboxMap.imageExists(withId: "end_marker") {
-                try mapView.mapboxMap.removeImage(withId: "end_marker")
-            }
+            removeMarkerImages(markerImageIDs, on: mapView)
+            markerImageIDs = []
             // Tear the stamp down explicitly — hide the layer and drop its registered image. The symbols also
             // vanish with the emptied lineSource, but don't rely on that; keep teardown symmetric with the
             // Google renderer and avoid leaking the last route's stamp image in the style registry.

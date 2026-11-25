@@ -110,18 +110,18 @@ final class MBTileProvider {
         let layerId = Constants.LayerIDs.tileLayer
         guard map.layerExists(withId: layerId) else { return }
 
-        // Attempt a no-op update as RasterLayer to verify the layer type matches
+        // Read the layer's type from the style. A no-op `updateLayer(withId:type: RasterLayer.self)` cannot tell:
+        // Mapbox v11 does not check the type there, so it never threw and the layer was never recreated (SPEX-3133).
+        let type = map.layerProperty(for: layerId, property: "type").value as? String
+        guard type != LayerType.raster.rawValue else { return }
+
+        // The layer exists but is not a RasterLayer — remove and re-add it
+        MPLog.mapbox.error("Tile layer type mismatch detected (\(type ?? "unknown")), recreating as RasterLayer")
         do {
-            try map.updateLayer(withId: layerId, type: RasterLayer.self) { _ in }
+            try map.removeLayer(withId: layerId)
+            try addTileLayer(on: map)
         } catch {
-            // The layer exists but is not a RasterLayer — remove and re-add it
-            MPLog.mapbox.error("Tile layer type mismatch detected, recreating as RasterLayer: \(error.localizedDescription)")
-            do {
-                try map.removeLayer(withId: layerId)
-                try addTileLayer(on: map)
-            } catch {
-                MPLog.mapbox.error("Failed to recreate tile layer: \(error.localizedDescription)")
-            }
+            MPLog.mapbox.error("Failed to recreate tile layer: \(error.localizedDescription)")
         }
     }
 

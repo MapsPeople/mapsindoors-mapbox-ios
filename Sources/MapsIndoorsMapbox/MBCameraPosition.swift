@@ -10,7 +10,7 @@ class MBCameraPosition: MPCameraPosition {
     }
 
     var zoom: Float {
-        Float(mapBoxCameraPosition.zoom ?? 0) + 1
+        Float(MBZoom.mapsIndoors(fromMapbox: mapBoxCameraPosition.zoom ?? 0))
     }
 
     var bearing: CLLocationDirection {
@@ -26,7 +26,7 @@ class MBCameraPosition: MPCameraPosition {
     }
 
     func camera(target: CLLocationCoordinate2D, zoom: Float) -> MPCameraPosition? {
-        let zoom = zoom - 1
+        let zoom = MBZoom.mapbox(fromMapsIndoors: Double(zoom))
         let cameraOptions = CameraOptions(
             center: target,
             zoom: CGFloat(zoom)

@@ -63,14 +63,15 @@ class MBCameraOperator: MPCameraOperator {
             to: CameraOptions(
                 center: target,
                 padding: mapProvider?.padding,
-                zoom: CGFloat(zoom - 1)))
+                zoom: CGFloat(MBZoom.mapbox(fromMapsIndoors: Double(zoom)))))
     }
 
     func animate(pos: MPCameraPosition) async {
         let newCamera = CameraOptions(
             center: CLLocationCoordinate2D(latitude: pos.target.latitude, longitude: pos.target.longitude),
             padding: mapProvider?.padding,
-            zoom: CGFloat(pos.zoom),
+            // `pos.zoom` is on the MapsIndoors scale, as in `move(target:zoom:)` (SPEX-3147).
+            zoom: CGFloat(MBZoom.mapbox(fromMapsIndoors: Double(pos.zoom))),
             bearing: pos.bearing,
             pitch: pos.viewingAngle)
         await apply(newCamera)
@@ -79,10 +80,8 @@ class MBCameraOperator: MPCameraOperator {
     func move(bounds: MPGeoBounds) {
         guard let view else { return }
         do {
-            let camera = try view.mapboxMap.camera(
-                for: [bounds.southWest, bounds.northEast], camera: CameraOptions(),
-                coordinatesPadding: mapProvider?.padding, maxZoom: nil, offset: nil)
-            view.mapboxMap.setCamera(to: camera)
+            let camera = try fit(bounds, on: view.mapboxMap)
+            view.mapboxMap.setCamera(to: withinLimits(camera))
         } catch {
             MPLog.mapbox.error("Error trying to move the Mapbox camera to bounds")
         }
@@ -90,7 +89,8 @@ class MBCameraOperator: MPCameraOperator {
 
     func animate(bounds: MPGeoBounds) async {
         do {
-            if let newCamera = try view?.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(), coordinatesPadding: mapProvider?.padding, maxZoom: nil, offset: nil) {
+            if let map = view?.mapboxMap {
+                let newCamera = try fit(bounds, on: map)
                 await apply(newCamera)
             }
         } catch {
@@ -99,19 +99,53 @@ class MBCameraOperator: MPCameraOperator {
     }
 
     func animate(target: CLLocationCoordinate2D, zoom: Float?) async {
-        let curZoom: Float? =
-            if let z = self.view?.mapboxMap.cameraState.zoom {
-                Float(z)
+        // A given zoom is on the MapsIndoors scale and is converted, as in `move(target:zoom:)`. Without one the
+        // map keeps its own zoom, which is already on the Mapbox scale (SPEX-3147). Without a map view there is
+        // no zoom to keep, so the move is dropped.
+        let mapboxZoom: CGFloat? =
+            if let zoom {
+                CGFloat(MBZoom.mapbox(fromMapsIndoors: Double(zoom)))
             } else {
-                nil
+                view?.mapboxMap.cameraState.zoom
             }
-        if let zoom = zoom ?? curZoom {
-            let newCamera = CameraOptions(
-                center: target,
-                padding: mapProvider?.padding,
-                zoom: CGFloat(zoom))
-            await apply(newCamera)
-        }
+        guard let mapboxZoom else { return }
+        let newCamera = CameraOptions(
+            center: target,
+            padding: mapProvider?.padding,
+            zoom: mapboxZoom)
+        await apply(newCamera)
+    }
+
+    /// The camera a fit to bounds is worked out for: at `MPMapControl.cameraLimits`' fixed bearing and tilt
+    /// when they set them. The fit's zoom depends on the bearing the area is seen from, so fitting at
+    /// another bearing and then turning to the fixed one leaves the area too big or too small for the
+    /// screen. The camera bounds hold a fixed tilt as their pitch range, so their maximum is the steepest
+    /// pitch to fit for.
+    private var fitCamera: CameraOptions {
+        guard let limits = mapProvider?.cameraLimits else { return CameraOptions() }
+        let maxPitch = Double(view?.mapboxMap.cameraBounds.maxPitch ?? 0)
+        return CameraOptions(
+            bearing: limits.fixedBearingDegrees,
+            pitch: limits.fixedTiltDegrees(maxTilt: maxPitch).map { CGFloat($0) })
+    }
+
+    /// `bounds` fitted inside the provider's padding, at the fixed bearing and tilt of `fitCamera`.
+    private func fit(_ bounds: MPGeoBounds, on map: MapboxMap) throws -> CameraOptions {
+        let camera = fitCamera
+        return try map.camera(
+            fitting: [bounds.southWest, bounds.northEast], padding: mapProvider?.padding ?? .zero,
+            bearing: camera.bearing, pitch: camera.pitch)
+    }
+
+    /// `camera` with its bearing held at `MPMapControl.cameraLimits`' fixed bearing, when it sets one. The
+    /// camera bounds already keep zoom, target and pitch inside the limits for a move made in code, but
+    /// Mapbox has no bearing bound, so without this the move would turn the map and the idle correction
+    /// would then turn it back.
+    private func withinLimits(_ camera: CameraOptions) -> CameraOptions {
+        guard camera.bearing != nil, let bearing = mapProvider?.cameraLimits?.fixedBearingDegrees else { return camera }
+        var kept = camera
+        kept.bearing = bearing
+        return kept
     }
 
     /// Eases to `camera` and returns when the ease has finished, or, when motion is not allowed for this map
@@ -119,6 +153,7 @@ class MBCameraOperator: MPCameraOperator {
     /// The instant path goes through `setCamera` rather than a zero-duration ease, so the camera is already
     /// there when the caller resumes and no animator is started at all.
     private func apply(_ camera: CameraOptions) async {
+        let camera = withinLimits(camera)
         guard let driver = cameraDriverOverride ?? view.map(MBMapViewCameraDriver.init(view:)) else { return }
         guard MPCameraMotion.shouldAnimate(for: mapProvider) else {
             driver.setCamera(to: camera)
@@ -145,7 +180,12 @@ class MBCameraOperator: MPCameraOperator {
 
     func camera(for bounds: MPGeoBounds, inserts: UIEdgeInsets) -> MPCameraPosition {
         do {
-            let mbCameraForBounds = try view?.mapboxMap.camera(for: [bounds.southWest, bounds.northEast], camera: CameraOptions(), coordinatesPadding: inserts, maxZoom: nil, offset: nil)
+            // Worked out for the provider's padding, which every operator move puts on the camera, so the position
+            // still fits once it is applied; `inserts` come on top, as with Google's `camera(for:insets:)`. A nil
+            // padding would use whatever padding the camera has now instead (SPEX-3129).
+            let mbCameraForBounds = try view?.mapboxMap.camera(
+                for: [bounds.southWest, bounds.northEast], camera: CameraOptions(padding: mapProvider?.padding ?? .zero),
+                coordinatesPadding: inserts, maxZoom: nil, offset: nil)
 
             let cameraOptions = CameraOptions(
                 center: mbCameraForBounds?.center,

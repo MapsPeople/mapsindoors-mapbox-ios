@@ -27,6 +27,19 @@ extension MapboxMap: MBStyleImaging {
     }
 }
 
+/// The subset of `MapboxMap`'s GeoJSON-source API a render commits its features through, abstracted so tests can
+/// read back what a render produced: Mapbox does not hand a GeoJSON source's data back through the style API once
+/// it has been updated. `MapboxMap` satisfies it by forwarding to its own `updateGeoJSONSource`.
+protocol MBGeoJSONSourceCommitting: AnyObject {
+    func commitGeoJSON(_ geoJSON: GeoJSONObject, toSourceWithId id: String)
+}
+
+extension MapboxMap: MBGeoJSONSourceCommitting {
+    func commitGeoJSON(_ geoJSON: GeoJSONObject, toSourceWithId id: String) {
+        updateGeoJSONSource(withId: id, geoJSON: geoJSON)
+    }
+}
+
 @MainActor
 class MBRenderer {
     /// The scale of an object relative to being zoomed out to zoom level 1 (from zoom level 22) 1/(2^22)
@@ -37,6 +50,9 @@ class MBRenderer {
     /// Style image registry used by the image-registration path. Defaults to `map`;
     /// injectable so tests can drive a stand-in that fails on a chosen image.
     weak var styleImaging: MBStyleImaging?
+    /// Where a render commits its features. Defaults to `map`; injectable so tests can read back the features a
+    /// render produced, per source.
+    weak var sourceCommitting: MBGeoJSONSourceCommitting?
     private var _geoJsonSource: GeoJSONSource?
     private var _geometryGeoJsonSource: GeoJSONSource?
     private var _geoJsonSourceNoCollision: GeoJSONSource?
@@ -71,6 +87,7 @@ class MBRenderer {
     init(mapView: MapView?, provider: MapBoxProvider?) {
         map = mapView?.mapboxMap
         styleImaging = map
+        sourceCommitting = map
         self.provider = provider
         self.mapView = mapView
 
@@ -906,6 +923,10 @@ class MBRenderer {
     var customInfoWindow: MPCustomInfoWindow?
     private static let infoWindowPrefix = "viewAnnotation"
 
+    /// Finds the location a selected model's info window is for. Reads the shared instance's locations; tests
+    /// replace it so an info window can be rendered without a loaded solution.
+    var locationLookup: (String) -> MPLocation? = { MPMapsIndoors.shared.locationWith(locationId: $0) }
+
     private func setupInfoWindowTapRecognizer(infoWindowView: UIView, modelId: String) {
         let recognizer = InfoWindowTapRecognizer(target: self, action: #selector(onInfoWindowTapped(sender:)))
         recognizer.modelId = modelId
@@ -960,6 +981,10 @@ class MBRenderer {
     private(set) var peakConcurrentRenders = 0
     private var activeRenders = 0
 
+    /// Test instrumentation: awaited at the start of each model's task in `render(models:)`, with the model's index,
+    /// so a test can make one task finish last and check that the sources still get the features in model order.
+    var modelTaskWillStart: (@Sendable (Int) async -> Void)?
+
     @MainActor
     func render(models: [any MPViewModel]) async throws {
         activeRenders += 1
@@ -1011,13 +1036,17 @@ class MBRenderer {
 
         try Task.checkCancellation()
 
-        let generatedModels = try await withThrowingTaskGroup(of: ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature]).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
-            for input in inputs {
+        // Each task returns its model's index, so the features keep the order of `models`. Completion order would
+        // let features with an equal `fill-sort-key` swap draw order from one render to the next.
+        let modelTaskWillStart = self.modelTaskWillStart
+        let generatedModels = try await withThrowingTaskGroup(of: (Int, ([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])).self) { group -> [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])] in
+            for (index, input) in inputs.enumerated() {
                 _ = group.addTaskUnlessCancelled(priority: .userInitiated) { [weak self] in
-                    guard let self else { return ([], [], [], [], [], []) }
+                    await modelTaskWillStart?(index)
+                    guard let self else { return (index, ([], [], [], [], [], [])) }
 
                     if let cacheHit = lock.locked({ self.modelCache[input.cacheKey] }) {
-                        return cacheHit
+                        return (index, cacheHit)
                     }
 
                     try Task.checkCancellation()
@@ -1083,7 +1112,7 @@ class MBRenderer {
 
                     lock.locked { self.modelCache[input.cacheKey] = result }
 
-                    return result
+                    return (index, result)
                 }
             }
 
@@ -1091,12 +1120,12 @@ class MBRenderer {
 
             // Drained with `for try await` rather than `reduce(into:)`: the latter sends the group and its
             // accumulator through a non-Sendable closure, which strict checking flags; the loop keeps both here.
-            var res = [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])]()
-            for try await feature in group {
-                res.append(feature)
+            var res = [([Feature], [Feature], [Feature], [Feature], [Feature], [Feature])?](repeating: nil, count: inputs.count)
+            for try await (index, feature) in group {
+                res[index] = feature
             }
 
-            return res
+            return res.compactMap { $0 }
         }
 
         await MainActor.run {
@@ -1146,7 +1175,7 @@ class MBRenderer {
 
     private func updateInfoWindow(for model: any MPViewModel) async {
         if model.showInfoWindow {
-            if let point = model.marker?.geometry.coordinates as? MPPoint, let location = MPMapsIndoors.shared.locationWith(locationId: model.id) {
+            if let point = model.marker?.geometry.coordinates as? MPPoint, let location = locationLookup(model.id) {
                 await createOrUpdateInfoWindow(for: model, at: point, location: location)
             }
         } else {
@@ -1205,11 +1234,24 @@ class MBRenderer {
             }
         }
 
-        guard infoWindows[model.id] == nil else { return }
+        // An open window follows its location: a later render may move the marker or change its icon (SPEX-3136).
+        // It is updated in place, not rebuilt, so the host is not asked for a new view on every render, and the
+        // window keeps its VoiceOver focus. Mapbox ignores a write of an unchanged value.
+        if let infoWindow = infoWindows[model.id] {
+            infoWindow.annotatedFeature = .geometry(Point(point.coordinate))
+            infoWindow.variableAnchors = Self.infoWindowAnchors(offsetX: xOffset, offsetY: yOffset)
+            return
+        }
 
         if let infoWindowView = customInfoWindow?.infoWindowFor(location: location) {
             presentInfoWindow(infoWindowView, at: point.coordinate, offsetX: xOffset, offsetY: yOffset, modelId: model.id)
         }
+    }
+
+    /// Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure
+    /// it appears above the marker, and thus only provide that option.
+    private static func infoWindowAnchors(offsetX: Double, offsetY: Double) -> [ViewAnnotationAnchorConfig] {
+        [ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: offsetX, offsetY: offsetY)]
     }
 
     /// Adds `infoWindowView` to the map above `coordinate`, and takes VoiceOver to it when it becomes visible.
@@ -1226,10 +1268,7 @@ class MBRenderer {
         view.ignoreCameraPadding = true
         view.allowOverlapWithPuck = true
 
-        // Mapbox will automatically adjust to the "best" anchor, depending on surroundings - but we just want to ensure it appears above the marker, and thus only provide that option.
-        view.variableAnchors = [
-            ViewAnnotationAnchorConfig(anchor: .bottom, offsetX: offsetX, offsetY: offsetY)
-        ]
+        view.variableAnchors = Self.infoWindowAnchors(offsetX: offsetX, offsetY: offsetY)
 
         // Remember the view annotation
         infoWindows[modelId] = view
@@ -1350,12 +1389,12 @@ class MBRenderer {
         // checks between them. A partial update (e.g. geometry updated but walls
         // left stale) causes features like 3D walls to disappear during rapid
         // camera movements when the RenderTaskQueue cancels in-flight tasks.
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonGeometrySource, geoJSON: .featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject)
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonNoCollisionSource, geoJSON: .featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject)
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceExtrusions, geoJSON: .featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject)
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSourceWalls, geoJSON: .featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject)
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource3dModels, geoJSON: .featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject)
-        map?.updateGeoJSONSource(withId: Constants.SourceIDs.geoJsonSource, geoJSON: .featureCollection(FeatureCollection(features: features)).geoJSONObject)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: geometryFeatures)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonGeometrySource)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: nonCollisionFeatures)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonNoCollisionSource)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: featuresExtrusions)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonSourceExtrusions)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: featuresWalls)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonSourceWalls)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: features3DModels)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonSource3dModels)
+        sourceCommitting?.commitGeoJSON(.featureCollection(FeatureCollection(features: features)).geoJSONObject, toSourceWithId: Constants.SourceIDs.geoJsonSource)
     }
 }
 
@@ -1546,7 +1585,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var wallExtrusionFeature: Feature? {
+    var wallExtrusionFeature: Feature? {
         guard let wallExtrusion else { return nil }
 
         var feature = Feature(geometry: wallExtrusion.geometry.featureGeometry())
@@ -1561,7 +1600,7 @@ extension MPViewModel {
         return feature
     }
 
-    fileprivate var featureExtrusionFeature: Feature? {
+    var featureExtrusionFeature: Feature? {
         guard let featureExtrusion else { return nil }
 
         var feature = Feature(geometry: featureExtrusion.geometry.featureGeometry())
@@ -1591,21 +1630,6 @@ extension CLLocationCoordinate2D {
         let sinLat = cosDistance * sinFromLat + sinDistance * cosFromLat * cos(heading)
         let dLng = atan2(sinDistance * cosFromLat * sin(heading), cosDistance - sinFromLat * sinLat)
         return CLLocationCoordinate2D(latitude: asin(sinLat).degrees, longitude: (fromLng + dLng).degrees)
-    }
-}
-
-extension UIImage {
-    fileprivate func scaled(size: CGSize) -> UIImage? {
-        guard size != .zero else { return nil }
-
-        let rendererFormat = UIGraphicsImageRendererFormat.preferred()
-        rendererFormat.opaque = false
-        rendererFormat.scale = scale
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size.width, height: size.height), format: rendererFormat)
-
-        return renderer.image { _ in
-            draw(in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
-        }
     }
 }
 
